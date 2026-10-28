@@ -42,6 +42,34 @@ Memories screen to send the whole current view (folder, tag or search):
 **Backup.** Share → Backup (re-importable) → Drive/Dropbox keeps a copy of all
 notes and photos. Settings (⋯) → Import backup restores it.
 
+## Google Drive backup & sync
+
+Settings (⋯) → **Connect Google Drive**. Everything (memories, photos,
+recordings, files) syncs to a **Idea Organizer Backup** folder in your Drive,
+plus a readable `notes.md`. Sync is two-way: open the app on another phone,
+connect the same Google account, and everything comes down. Deleting a memory
+syncs too (its files go to Drive's trash). The app uses the `drive.file`
+permission, so it can only see files it created.
+
+**One-time setup: create the OAuth Client ID** (Google requires one per app):
+
+1. Go to https://console.cloud.google.com/ → create a project, e.g. "Idea Organizer".
+2. **APIs & Services → Library** → search **Google Drive API** → **Enable**.
+3. **APIs & Services → OAuth consent screen** (Google Auth Platform → Branding /
+   Audience): app name "Idea Organizer", your email as support and developer
+   contact, User type **External**. Under **Audience → Test users** add the
+   Gmail account(s) you'll back up to. (Testing mode is fine for personal use.)
+4. **Data access → Add or remove scopes** → add `.../auth/drive.file`.
+5. **Clients (Credentials) → Create client → OAuth client ID** → type
+   **Web application**. Under **Authorized JavaScript origins** add
+   `https://chaitanyanekkalapu.github.io` (and `http://localhost:8790` for local
+   testing). No redirect URIs needed. Create.
+6. Copy the **Client ID** (`…apps.googleusercontent.com`) into
+   `js/config.js` → `googleClientId`, then publish.
+
+In Testing mode Google may ask you to sign in again about once a week; the
+Home screen shows "Tap to sync with Google Drive" when that's needed.
+
 ## Run on this PC
 
 ```bash

@@ -199,6 +199,14 @@ mark { background: rgba(61, 220, 151, .25); color: var(--text); border-radius: 3
 .capture-types button.on { border-color: var(--accent); color: var(--text); }
 .capture-types svg { color: var(--accent); }
 
+.sync-chip {
+  display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 10px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 16px;
+  margin: 14px 0 0; font-size: 15px; color: var(--text); text-align: left;
+}
+.sync-chip span { color: var(--muted); font-size: 13px; }
+.sync-chip.warn { border-color: #2f5c48; color: var(--accent); }
+
 .share-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 4px 0 8px; }
 .share-grid button {
   background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px 4px;

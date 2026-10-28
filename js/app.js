@@ -1,6 +1,10 @@
 // Idea Organizer UI. Four tabs (Home, Ask, Memories, Reminders) plus bottom
 // sheets for capture, detail and edit. All data comes from DB, all "smart"
 // output from Smart.analyze().
+
+// If an older cached page didn't load drive.js, run without Drive sync.
+if (typeof Drive === 'undefined') window.Drive = { configured: false, hasToken: () => false };
+
 (() => {
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -16,6 +20,7 @@
     remTab: 'upcoming',
     askQuery: '',
     settings: {},
+    drive: { connected: false, email: '', folderId: '', lastSync: 0, auto: true, pending: false, deleted: {} },
   };
 
   // ---------- helpers -------------------------------------------------------
@@ -93,6 +98,8 @@
   // ---------- data ----------------------------------------------------------
   async function load() {
     state.notes = await DB.allNotes();
+    Object.assign(state.drive, await DB.getSetting('drive', {}));
+    state.drive.deleted = await DB.getSetting('driveDeleted', {});
   }
 
   function folders() {
@@ -119,6 +126,123 @@
     const i = state.notes.findIndex(n => n.id === note.id);
     if (i >= 0) state.notes[i] = note; else state.notes.unshift(note);
     state.notes.sort((a, b) => b.createdAt - a.createdAt);
+    scheduleSync();
+  }
+
+  // Deleting records a "deleted" marker so other devices (and Drive) drop the
+  // memory too instead of bringing it back on the next sync.
+  async function removeNote(note) {
+    await DB.deleteNote(note);
+    state.notes = state.notes.filter(x => x.id !== note.id);
+    state.drive.deleted[note.id] = Date.now();
+    await DB.setSetting('driveDeleted', state.drive.deleted);
+    scheduleSync();
+  }
+
+  // ---------- Google Drive sync ---------------------------------------------
+  // Two-way: pull what's in Drive, merge (newer edit wins, deletions win over
+  // older edits), then push the merged result. Runs a few seconds after each
+  // change while signed in, when the app opens, and on "Sync now".
+  let syncTimer = null, syncing = false;
+
+  async function saveDriveState() {
+    const { connected, email, folderId, lastSync, auto } = state.drive;
+    await DB.setSetting('drive', { connected, email, folderId, lastSync, auto });
+  }
+
+  function scheduleSync() {
+    if (!Drive.configured || !state.drive.connected || !state.drive.auto) return;
+    state.drive.pending = true;
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => syncNow(false), 6000);
+  }
+
+  function agoLabel(ts) {
+    if (!ts) return 'never';
+    const m = Math.round((Date.now() - ts) / 60000);
+    return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : shortDate(ts);
+  }
+
+  async function syncNow(interactive) {
+    if (!Drive.configured || syncing) return;
+    if (!Drive.hasToken()) {
+      if (!interactive) { state.drive.pending = true; if (state.tab === 'home') render(); return; }
+      try { await Drive.connect(''); } catch (e) { toast(e.message, 4000); return; }
+    }
+    syncing = true;
+    const say = msg => { if (interactive) toast('☁️ ' + msg, 8000); };
+    try {
+      const remote = await Drive.pull({ folderId: state.drive.folderId, onProgress: say });
+      state.drive.folderId = remote.folderId;
+
+      const deleted = { ...remote.deleted, ...state.drive.deleted };
+      for (const [id, t] of Object.entries(remote.deleted)) deleted[id] = Math.max(t, state.drive.deleted[id] || 0);
+      const local = new Map(state.notes.map(n => [n.id, n]));
+      let pulled = 0, removed = 0;
+
+      for (const r of remote.notes) {
+        if (deleted[r.id] && deleted[r.id] >= (r.updatedAt || 0)) continue;
+        const l = local.get(r.id);
+        if (l && (l.updatedAt || 0) >= (r.updatedAt || 0)) continue;
+        for (const a of r.attachments || []) {
+          if (await DB.getBlob(a.blobId)) continue;
+          say(`Downloading ${a.name}…`);
+          const b = await remote.fetchBlob(a.blobId);
+          if (b) await DB.putBlobWithId(a.blobId, b);
+        }
+        await DB.putNote(r);
+        local.set(r.id, r);
+        pulled++;
+      }
+      for (const [id, t] of Object.entries(deleted)) {
+        const l = local.get(id);
+        if (l && (l.updatedAt || 0) <= t) { await DB.deleteNote(l); local.delete(id); removed++; }
+      }
+      state.notes = [...local.values()].sort((a, b) => b.createdAt - a.createdAt);
+      state.drive.deleted = deleted;
+      await DB.setSetting('driveDeleted', deleted);
+
+      const res = await Drive.push({
+        folderId: remote.folderId,
+        files: remote.files,
+        notes: state.notes,
+        deleted,
+        getBlob: id => DB.getBlob(id),
+        readable: `# Idea Organizer\n\nBacked up ${fullDate(Date.now())} · ${state.notes.length} memories\n\n` + state.notes.map(noteMarkdown).join('\n\n---\n\n'),
+        onProgress: say,
+      });
+      state.drive.lastSync = res.at;
+      state.drive.pending = false;
+      await saveDriveState();
+      const parts = [];
+      if (pulled) parts.push(`${pulled} from Drive`);
+      if (removed) parts.push(`${removed} removed`);
+      if (res.uploaded) parts.push(`${res.uploaded} file${res.uploaded > 1 ? 's' : ''} uploaded`);
+      if (interactive || pulled || removed) toast('☁️ Synced with Google Drive' + (parts.length ? ' · ' + parts.join(', ') : ''), 3500);
+      if (pulled || removed || state.tab === 'home') render();
+    } catch (e) {
+      state.drive.pending = true;
+      if (e.code === 'auth') { if (interactive) toast('Please sign in to Google again'); }
+      else if (interactive || navigator.onLine) toast('Drive sync failed: ' + e.message, 5000);
+      if (state.tab === 'home') render();
+    } finally {
+      syncing = false;
+    }
+  }
+
+  async function connectDrive() {
+    try {
+      await Drive.connect('consent');
+      const me = await Drive.whoAmI().catch(() => null);
+      state.drive.connected = true;
+      state.drive.email = me ? me.emailAddress : '';
+      state.drive.auto = true;
+      await saveDriveState();
+      toast('Connected to Google Drive. Syncing…');
+      await syncNow(true);
+    } catch (e) {
+      toast(e.message, 4000);
+    }
   }
 
   // ---------- tabs ----------------------------------------------------------
@@ -181,6 +305,10 @@
         <div class="stat"><b>${rems.length}</b><span>Open reminders</span></div>
         <div class="stat"><b>${state.notes.filter(n => n.createdAt > weekAgo).length}</b><span>This week</span></div>
       </div>
+      ${Drive.configured && state.drive.connected ? (state.drive.pending || !Drive.hasToken()
+        ? `<button class="sync-chip warn" id="syncChip">☁️ Tap to sync with Google Drive<span>last ${esc(agoLabel(state.drive.lastSync))}</span></button>`
+        : `<div class="sync-chip">☁️ Backed up to Google Drive<span>${esc(agoLabel(state.drive.lastSync))}</span></div>`)
+        : Drive.configured ? `<button class="sync-chip warn" id="syncSetup">☁️ Back up to Google Drive<span>Set up</span></button>` : ''}
       <div class="hero">
         <button class="mic-big" id="bigmic" aria-label="Record a voice memory">${ICONS.voice}</button>
         <p>Tap to capture an idea by voice</p>
@@ -197,6 +325,10 @@
       ${state.notes.length ? state.notes.slice(0, 3).map(cardHTML).join('') : emptyHTML('Your memories will show up here.')}
     `;
     $('#bigmic').onclick = () => openCapture('voice', true);
+    const chip = $('#syncChip');
+    if (chip) chip.onclick = () => syncNow(true);
+    const setup = $('#syncSetup');
+    if (setup) setup.onclick = openMoreMenu;
     $$('[data-cap]').forEach(b => b.onclick = () => openCapture(b.dataset.cap));
     $$('[data-go]').forEach(b => b.onclick = () => setTab(b.dataset.go));
     $('#more').onclick = openMoreMenu;
@@ -841,8 +973,7 @@
       $('#share', body).onclick = () => openShare([n], n.title);
       $('#del', body).onclick = async () => {
         if (!confirm('Delete this memory? This cannot be undone.')) return;
-        await DB.deleteNote(n);
-        state.notes = state.notes.filter(x => x.id !== n.id);
+        await removeNote(n);
         closeSheet();
         render();
         toast('Deleted');
@@ -938,10 +1069,23 @@
         <button id="imp">${ICONS.file} Import backup<input type="file" id="impFile" accept="application/json,.json" hidden></button>
         <button id="ntf">${ICONS.bell} Reminder alerts<span class="count">${perm === 'granted' ? 'On' : perm === 'denied' ? 'Blocked' : perm === 'unsupported' ? 'Not supported' : 'Off'}</span></button>
       </div>
+      <h2 style="margin-top:22px">☁️ Google Drive</h2>
+      ${!Drive.configured
+        ? `<p class="small muted">Drive sync needs a one-time Google setup (an OAuth Client ID) before it can be switched on.</p>`
+        : !state.drive.connected
+          ? `<p class="small muted">Back up all memories, photos and recordings to a folder in your Google Drive, and keep phones in sync.</p>
+             <button class="btn" id="driveConnect" style="width:100%">Connect Google Drive</button>`
+          : `<p class="small muted">Signed in${state.drive.email ? ' as <b>' + esc(state.drive.email) + '</b>' : ''} · last synced ${esc(agoLabel(state.drive.lastSync))}<br>
+             Folder in Drive: <b>Idea Organizer Backup</b></p>
+             <div class="menu-list">
+               <button id="driveSync">☁️ Sync now<span class="count">${state.notes.length} notes</span></button>
+               <button id="driveAuto">🔁 Auto sync after changes<span class="count">${state.drive.auto ? 'On' : 'Off'}</span></button>
+               <button id="driveOff">⏏️ Disconnect Google Drive<span class="count">Keeps the backup</span></button>
+             </div>`}
       <hr class="sep">
       <p class="small muted"><b>AI upgrade:</b> not connected. Titles, summaries, tags and reminders come from the on-device rules engine.
       An AI key can be added later to upgrade them.</p>
-      <p class="small muted"><b>Storage:</b> everything stays on this device. Export a backup regularly.</p>
+      <p class="small muted"><b>Storage:</b> memories are kept on this device${state.drive.connected ? ' and synced to your Google Drive' : '. Connect Google Drive, or export a backup regularly'}.</p>
       <div class="row end"><button class="btn danger small" id="wipe">Delete all data</button></div>
     `, body => {
       $('#exp', body).onclick = () => openShare(state.notes, 'All memories');
@@ -954,8 +1098,26 @@
         else if (perm === 'denied') toast('Alerts are blocked. Allow notifications in the browser site settings.');
         openMoreMenu();
       };
+      const dc = $('#driveConnect', body);
+      if (dc) dc.onclick = async () => { closeSheet(); await connectDrive(); render(); };
+      const ds = $('#driveSync', body);
+      if (ds) ds.onclick = async () => { closeSheet(); await syncNow(true); };
+      const da = $('#driveAuto', body);
+      if (da) da.onclick = async () => { state.drive.auto = !state.drive.auto; await saveDriveState(); openMoreMenu(); };
+      const doff = $('#driveOff', body);
+      if (doff) doff.onclick = async () => {
+        if (!confirm('Stop syncing with Google Drive? Your backup stays in Drive.')) return;
+        await Drive.disconnect();
+        state.drive.connected = false;
+        state.drive.email = '';
+        await saveDriveState();
+        openMoreMenu();
+        render();
+      };
       $('#wipe', body).onclick = async () => {
-        if (!confirm('Delete ALL memories and files on this device?')) return;
+        if (!confirm(state.drive.connected
+          ? 'Delete ALL memories and files on this device? Your Google Drive backup is kept, and the next sync will bring them back unless you disconnect Drive first.'
+          : 'Delete ALL memories and files on this device?')) return;
         if (!confirm('Really delete everything? Export a backup first if unsure.')) return;
         await DB.clearAll();
         state.notes = [];
@@ -1208,6 +1370,7 @@
       let added = 0;
       for (const n of data.notes) { if (!have.has(n.id)) added++; await DB.putNote(n); }
       state.notes = await DB.allNotes();
+      scheduleSync();
       closeSheet();
       render();
       toast(`Imported ${plural(added, 'new memory').replace('memorys', 'memories')}`);
@@ -1286,7 +1449,12 @@
     }
     checkDue();
     setInterval(checkDue, 30000);
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) { checkDue(); render(); } });
+    // Pick up changes made on other devices when the app opens or comes back.
+    const syncIfStale = () => {
+      if (Drive.configured && state.drive.connected && state.drive.auto && Date.now() - (state.drive.lastSync || 0) > 5 * 60000) syncNow(false);
+    };
+    syncIfStale();
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) { checkDue(); render(); syncIfStale(); } });
     if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
       navigator.serviceWorker.register('sw.js').catch(() => {});
       navigator.serviceWorker.addEventListener('message', e => { if (e.data && e.data.open) openDetail(e.data.open); });

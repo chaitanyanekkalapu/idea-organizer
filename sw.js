@@ -1,9 +1,9 @@
 // Offline cache for the app shell. Bump VERSION whenever a file changes so
 // phones pick up the new copy.
-const VERSION = 'ideas-v7';
+const VERSION = 'ideas-v8';
 const SHELL = [
   './', 'index.html', 'styles.css', 'manifest.webmanifest',
-  'js/db.js', 'js/smart.js', 'js/app.js',
+  'js/config.js', 'js/db.js', 'js/drive.js', 'js/smart.js', 'js/app.js',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',
 ];
 
@@ -47,8 +47,10 @@ self.addEventListener('fetch', e => {
     return;
   }
   if (e.request.method !== 'GET' || url.origin !== location.origin) return;
+  // cache: 'no-cache' revalidates with the server, so the browser's HTTP cache
+  // can't hand back an old index.html next to a new app.js.
   e.respondWith(
-    fetch(e.request)
+    fetch(e.request, { cache: 'no-cache' })
       .then(res => {
         const copy = res.clone();
         caches.open(VERSION).then(c => c.put(e.request, copy));
