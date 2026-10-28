@@ -30,6 +30,13 @@ if (typeof Drive === 'undefined') window.Drive = { configured: false, hasToken: 
   const ord = n => n + (n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] || 'th');
   const time = d => d.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true }).toUpperCase();
   const shortDate = ts => { const d = new Date(ts); return `${ord(d.getDate())} ${MON[d.getMonth()]}`; };
+  // Full stamp shown on every memory: "Wed, 29 Oct 2026 · 10:38 AM".
+  const dateStamp = (ts, sep = ' · ') => {
+    const d = new Date(ts);
+    return `${DAY[d.getDay()].slice(0, 3)}, ${d.getDate()} ${MON[d.getMonth()]} ${d.getFullYear()}${sep}${time(d)}`;
+  };
+  // Changed more than a minute after it was saved.
+  const wasEdited = n => !!n.updatedAt && n.updatedAt - n.createdAt > 60000;
   const startOfDay = ts => { const d = new Date(ts); d.setHours(0, 0, 0, 0); return d.getTime(); };
   const DAY_MS = 86400000;
 
@@ -260,7 +267,7 @@ if (typeof Drive === 'undefined') window.Drive = { configured: false, hasToken: 
 
   function cardHTML(n) {
     const rems = (n.reminders || []).filter(r => !r.done).length;
-    const meta = [shortDate(n.createdAt), time(new Date(n.createdAt))];
+    const meta = [dateStamp(n.createdAt)];
     if (n.type === 'voice' && n.duration) meta.push(durLabel(n.duration));
     if ((n.attachments || []).some(a => a.kind === 'audio')) meta.push('🎧');
     else if (n.type !== 'text') meta.push(n.type.charAt(0).toUpperCase() + n.type.slice(1));
@@ -949,12 +956,16 @@ if (typeof Drive === 'undefined') window.Drive = { configured: false, hasToken: 
     const imgs = (n.attachments || []).filter(a => a.kind === 'image');
     const others = (n.attachments || []).filter(a => a.kind !== 'image');
     const rems = (n.reminders || []).map(r => ({ ...r, note: n }));
-    const meta = [shortDate(n.createdAt), time(new Date(n.createdAt))];
+    const meta = [esc(n.folder || 'Inbox')];
     if (n.duration) meta.push(durLabel(n.duration));
     openSheet(`
-      <div class="sheet-head"><div class="detail-meta" style="flex:1">${meta.map(esc).join(' • ')} · ${esc(n.folder || 'Inbox')}</div>
+      <div class="sheet-head"><div class="detail-meta" style="flex:1">${meta.join(' • ')}</div>
         <button class="icon-btn" data-close aria-label="Close">${ICONS.close}</button></div>
       <div class="detail-title">${esc(n.title || 'Untitled memory')}</div>
+      <div class="stamps">
+        <span>📅 Saved ${esc(dateStamp(n.createdAt, ' at '))}</span>
+        ${wasEdited(n) ? `<span>✏️ Edited ${esc(dateStamp(n.updatedAt, ' at '))}</span>` : ''}
+      </div>
       ${(n.tags || []).length ? `<div class="chips">${n.tags.map(t => `<span class="chip tag">${esc(t)}</span>`).join('')}</div>` : ''}
       ${n.summary ? `<div class="detail-block"><h4>Summary</h4><p>${esc(n.summary)}</p></div>` : ''}
       ${rems.length ? `<div class="detail-block"><h4>Reminders</h4>${rems.map(remHTML).join('')}</div>` : ''}
@@ -1145,12 +1156,13 @@ if (typeof Drive === 'undefined') window.Drive = { configured: false, hasToken: 
 
   const stamp = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
   const slug = s => (s || 'memory').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '').slice(0, 50) || 'memory';
-  const fullDate = ts => `${shortDate(ts)} ${new Date(ts).getFullYear()}, ${time(new Date(ts))}`;
+  const fullDate = ts => dateStamp(ts, ', ');
+  const stampLine = n => `Saved ${dateStamp(n.createdAt, ' at ')}${wasEdited(n) ? ` · Edited ${dateStamp(n.updatedAt, ' at ')}` : ''}`;
   const extraTags = n => (n.tags || []).filter(t => t !== (n.folder || 'Inbox'));
   const remLine = r => `${r.text}${r.due ? ' (' + whenLabel(r.due) + ')' : ''}${r.done ? ' [done]' : ''}`;
 
   function noteText(n) {
-    const out = [n.title || 'Untitled memory', `${fullDate(n.createdAt)} · ${n.folder || 'Inbox'}${extraTags(n).length ? ' · ' + extraTags(n).join(', ') : ''}`];
+    const out = [n.title || 'Untitled memory', stampLine(n), `${n.folder || 'Inbox'}${extraTags(n).length ? ' · ' + extraTags(n).join(', ') : ''}`];
     if (n.summary) out.push('', 'Summary:', n.summary);
     if ((n.reminders || []).length) out.push('', 'Reminders:', ...n.reminders.map(r => '• ' + remLine(r)));
     if (n.body && n.body !== n.summary) out.push('', n.type === 'voice' ? 'Transcript:' : 'Note:', n.body);
@@ -1161,7 +1173,7 @@ if (typeof Drive === 'undefined') window.Drive = { configured: false, hasToken: 
   }
 
   function noteMarkdown(n) {
-    const out = [`## ${n.title || 'Untitled memory'}`, `*${fullDate(n.createdAt)} · ${n.folder || 'Inbox'}*${(n.tags || []).length ? '  \n' + n.tags.map(t => '#' + t.replace(/\s+/g, '')).join(' ') : ''}`];
+    const out = [`## ${n.title || 'Untitled memory'}`, `*${stampLine(n)} · ${n.folder || 'Inbox'}*${(n.tags || []).length ? '  \n' + n.tags.map(t => '#' + t.replace(/\s+/g, '')).join(' ') : ''}`];
     if (n.summary) out.push('', `**Summary:** ${n.summary}`);
     if ((n.reminders || []).length) out.push('', '**Reminders**', ...n.reminders.map(r => `- [${r.done ? 'x' : ' '}] ${r.text}${r.due ? ' — ' + whenLabel(r.due) : ''}`));
     if (n.body && n.body !== n.summary) out.push('', `**${n.type === 'voice' ? 'Transcript' : 'Note'}**`, '', n.body);
@@ -1172,7 +1184,7 @@ if (typeof Drive === 'undefined') window.Drive = { configured: false, hasToken: 
   function noteHTML(n) {
     const p = s => esc(s).replace(/\n/g, '<br>');
     return `<h2>${esc(n.title || 'Untitled memory')}</h2>
-      <p class="m">${esc(fullDate(n.createdAt))} · ${esc(n.folder || 'Inbox')}${extraTags(n).length ? ' · ' + esc(extraTags(n).join(', ')) : ''}</p>
+      <p class="m">${esc(stampLine(n))} · ${esc(n.folder || 'Inbox')}${extraTags(n).length ? ' · ' + esc(extraTags(n).join(', ')) : ''}</p>
       ${n.summary ? `<p><b>Summary:</b> ${p(n.summary)}</p>` : ''}
       ${(n.reminders || []).length ? `<p><b>Reminders</b></p><ul>${n.reminders.map(r => `<li>${r.done ? '☑' : '☐'} ${esc(remLine(r))}</li>`).join('')}</ul>` : ''}
       ${n.body && n.body !== n.summary ? `<p><b>${n.type === 'voice' ? 'Transcript' : 'Note'}</b></p><p>${p(n.body)}</p>` : ''}

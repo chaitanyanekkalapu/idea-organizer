@@ -253,6 +253,8 @@ textarea.input { min-height: 120px; resize: vertical; line-height: 1.5; }
 /* Detail */
 .detail-meta { color: var(--muted); font-size: 14px; margin-bottom: 4px; }
 .detail-title { font-size: 24px; font-weight: 600; margin: 4px 0 10px; line-height: 1.25; }
+.stamps { display: flex; flex-direction: column; gap: 3px; color: var(--muted); font-size: 14px; margin: 0 0 10px; }
+
 .detail-block { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; margin: 14px 0; }
 .detail-block h4 { margin: 0 0 8px; font-size: 13px; color: var(--accent); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
 .detail-block p { margin: 0; white-space: pre-wrap; }
