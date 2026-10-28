@@ -86,6 +86,7 @@
     check: '<svg viewBox="0 0 24 24" style="width:16px;height:16px;stroke-width:3"><path d="M5 12l5 5 9-10"/></svg>',
     cal: '<svg viewBox="0 0 24 24" style="width:18px;height:18px"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/></svg>',
     stop: '<svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor"/></svg>',
+    share: '<svg viewBox="0 0 24 24"><path d="M12 15V4M8 8l4-4 4 4"/><path d="M5 12v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6"/></svg>',
     bell: '<svg viewBox="0 0 24 24"><path d="M6 16V11a6 6 0 0 1 12 0v5l2 2H4z"/><path d="M10 21h4"/></svg>',
   };
 
@@ -223,6 +224,14 @@
     });
   }
 
+  function viewTitle() {
+    const parts = [state.folder === 'All' ? 'All memories' : state.folder];
+    if (state.filterTag) parts.push(state.filterTag);
+    if (state.filterType) parts.push(state.filterType);
+    if (state.query.trim()) parts.push(`"${state.query.trim()}"`);
+    return parts.join(' · ');
+  }
+
   function renderMemories() {
     const list = filteredNotes();
     const filtering = state.filterTag || state.filterType;
@@ -232,6 +241,7 @@
           <h1>${esc(state.folder)} <small>${list.length}</small></h1>
           <svg viewBox="0 0 24 24" style="width:20px;color:var(--muted)"><path d="M6 9l6 6 6-6"/></svg></button>
         <div class="grow"></div>
+        <button class="round-btn" id="shareView" aria-label="Share or export these memories">${ICONS.share}</button>
         <button class="round-btn" id="more" aria-label="More">${ICONS.dots}</button>
       </div>
       <div class="search-row">
@@ -249,6 +259,7 @@
       bindCards($('#list'));
     };
     $('#folderBtn').onclick = openFolderMenu;
+    $('#shareView').onclick = () => openShare(filteredNotes(), viewTitle());
     $('#filterBtn').onclick = openFilter;
     $('#more').onclick = openMoreMenu;
     bindCards();
@@ -799,10 +810,12 @@
       ${others.map(a => a.kind === 'audio'
         ? `<div class="attach"><audio controls data-blob="${a.blobId}"></audio></div>`
         : `<div class="attach">${ICONS.file}<a data-blob="${a.blobId}" download="${esc(a.name)}">${esc(a.name)}</a></div>`).join('')}
-      <div class="row end"><button class="btn danger" id="del">Delete</button><div class="grow"></div><button class="btn" id="edit">Edit</button></div>
+      <div class="row end"><button class="btn danger" id="del">Delete</button><div class="grow"></div>
+        <button class="btn ghost" id="share">Share</button><button class="btn" id="edit">Edit</button></div>
     `, body => {
       $('[data-close]', body).onclick = () => closeSheet();
       $('#edit', body).onclick = () => openEdit(n.id);
+      $('#share', body).onclick = () => openShare([n], n.title);
       $('#del', body).onclick = async () => {
         if (!confirm('Delete this memory? This cannot be undone.')) return;
         await DB.deleteNote(n);
@@ -896,7 +909,9 @@
     openSheet(`
       <h2>Settings</h2>
       <div class="menu-list">
-        <button id="exp">${ICONS.file} Export backup<span class="count">${state.notes.length} notes</span></button>
+        ${state.tab === 'memories' && filteredNotes().length !== state.notes.length
+          ? `<button id="expView">${ICONS.file} Export / share this view<span class="count">${filteredNotes().length} notes</span></button>` : ''}
+        <button id="exp">${ICONS.file} Export / share all<span class="count">${state.notes.length} notes</span></button>
         <button id="imp">${ICONS.file} Import backup<input type="file" id="impFile" accept="application/json,.json" hidden></button>
         <button id="ntf">${ICONS.bell} Reminder alerts<span class="count">${perm === 'granted' ? 'On' : perm === 'denied' ? 'Blocked' : perm === 'unsupported' ? 'Not supported' : 'Off'}</span></button>
         <button id="aud">${ICONS.voice} Keep audio of voice notes<span class="count">${state.settings.keepAudio ? 'On' : 'Off'}</span></button>
@@ -907,7 +922,9 @@
       <p class="small muted"><b>Storage:</b> everything stays on this device. Export a backup regularly.</p>
       <div class="row end"><button class="btn danger small" id="wipe">Delete all data</button></div>
     `, body => {
-      $('#exp', body).onclick = exportBackup;
+      $('#exp', body).onclick = () => openShare(state.notes, 'All memories');
+      const ev = $('#expView', body);
+      if (ev) ev.onclick = () => openShare(filteredNotes(), viewTitle());
       $('#imp', body).onclick = () => $('#impFile', body).click();
       $('#impFile', body).onchange = e => importBackup(e.target.files[0]);
       $('#ntf', body).onclick = async () => {
@@ -935,17 +952,235 @@
 
   const toDataUrl = blob => new Promise(r => { const f = new FileReader(); f.onload = () => r(f.result); f.readAsDataURL(blob); });
 
-  async function exportBackup() {
-    toast('Preparing backup…');
+  // ---------- Share / export ------------------------------------------------
+  // Everything goes out through the phone's own share menu (navigator.share),
+  // which lists WhatsApp, Google Drive, Dropbox, Box, Gmail and any other
+  // installed app, so no per-service login is needed. Where sharing files
+  // isn't supported, the file is downloaded instead.
+  const FORMATS = {
+    doc: { label: 'Word', ext: 'doc', mime: 'application/msword' },
+    txt: { label: 'Text', ext: 'txt', mime: 'text/plain' },
+    md: { label: 'Markdown', ext: 'md', mime: 'text/markdown' },
+    csv: { label: 'Spreadsheet (CSV)', ext: 'csv', mime: 'text/csv', many: true },
+    json: { label: 'Backup (re-importable)', ext: 'json', mime: 'application/json', many: true },
+  };
+
+  const stamp = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  const slug = s => (s || 'memory').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '').slice(0, 50) || 'memory';
+  const fullDate = ts => `${shortDate(ts)} ${new Date(ts).getFullYear()}, ${time(new Date(ts))}`;
+  const extraTags = n => (n.tags || []).filter(t => t !== (n.folder || 'Inbox'));
+  const remLine = r => `${r.text}${r.due ? ' (' + whenLabel(r.due) + ')' : ''}${r.done ? ' [done]' : ''}`;
+
+  function noteText(n) {
+    const out = [n.title || 'Untitled memory', `${fullDate(n.createdAt)} · ${n.folder || 'Inbox'}${extraTags(n).length ? ' · ' + extraTags(n).join(', ') : ''}`];
+    if (n.summary) out.push('', 'Summary:', n.summary);
+    if ((n.reminders || []).length) out.push('', 'Reminders:', ...n.reminders.map(r => '• ' + remLine(r)));
+    if (n.body && n.body !== n.summary) out.push('', n.type === 'voice' ? 'Transcript:' : 'Note:', n.body);
+    if ((n.links || []).length) out.push('', 'Links:', ...n.links);
+    const files = (n.attachments || []).filter(a => a.kind !== 'audio');
+    if (files.length) out.push('', 'Attachments: ' + files.map(a => a.name).join(', '));
+    return out.join('\n');
+  }
+
+  function noteMarkdown(n) {
+    const out = [`## ${n.title || 'Untitled memory'}`, `*${fullDate(n.createdAt)} · ${n.folder || 'Inbox'}*${(n.tags || []).length ? '  \n' + n.tags.map(t => '#' + t.replace(/\s+/g, '')).join(' ') : ''}`];
+    if (n.summary) out.push('', `**Summary:** ${n.summary}`);
+    if ((n.reminders || []).length) out.push('', '**Reminders**', ...n.reminders.map(r => `- [${r.done ? 'x' : ' '}] ${r.text}${r.due ? ' — ' + whenLabel(r.due) : ''}`));
+    if (n.body && n.body !== n.summary) out.push('', `**${n.type === 'voice' ? 'Transcript' : 'Note'}**`, '', n.body);
+    if ((n.links || []).length) out.push('', ...n.links.map(l => `- <${l}>`));
+    return out.join('\n');
+  }
+
+  function noteHTML(n) {
+    const p = s => esc(s).replace(/\n/g, '<br>');
+    return `<h2>${esc(n.title || 'Untitled memory')}</h2>
+      <p class="m">${esc(fullDate(n.createdAt))} · ${esc(n.folder || 'Inbox')}${extraTags(n).length ? ' · ' + esc(extraTags(n).join(', ')) : ''}</p>
+      ${n.summary ? `<p><b>Summary:</b> ${p(n.summary)}</p>` : ''}
+      ${(n.reminders || []).length ? `<p><b>Reminders</b></p><ul>${n.reminders.map(r => `<li>${r.done ? '☑' : '☐'} ${esc(remLine(r))}</li>`).join('')}</ul>` : ''}
+      ${n.body && n.body !== n.summary ? `<p><b>${n.type === 'voice' ? 'Transcript' : 'Note'}</b></p><p>${p(n.body)}</p>` : ''}
+      ${(n.links || []).length ? `<p>${n.links.map(l => `<a href="${esc(l)}">${esc(l)}</a>`).join('<br>')}</p>` : ''}`;
+  }
+
+  function docHTML(notes, title, images = {}) {
+    return `<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title>
+      <style>body{font-family:Calibri,Segoe UI,Arial,sans-serif;max-width:720px;margin:24px auto;padding:0 16px;color:#111;line-height:1.45}
+      h1{font-size:22px}h2{font-size:18px;margin:28px 0 4px;border-top:1px solid #ccc;padding-top:16px}.m{color:#666;font-size:13px;margin:0 0 8px}
+      img{max-width:100%;max-height:420px;margin:8px 0}ul{padding-left:20px}</style></head><body>
+      <h1>${esc(title)}</h1><p class="m">Exported ${esc(fullDate(Date.now()))} · ${plural(notes.length, 'memory').replace('memorys', 'memories')}</p>
+      ${notes.map(n => noteHTML(n) + (n.attachments || []).filter(a => a.kind === 'image' && images[a.blobId]).map(a => `<img src="${images[a.blobId]}" alt="">`).join('')).join('')}
+      </body></html>`;
+  }
+
+  function csvText(notes) {
+    const cell = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const rows = [['Date', 'Time', 'Title', 'Folder', 'Tags', 'Summary', 'Note / transcript', 'Reminders', 'Links', 'Type']];
+    for (const n of notes) {
+      const d = new Date(n.createdAt);
+      rows.push([`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`,
+        time(d), n.title, n.folder, (n.tags || []).join(', '), n.summary, n.body,
+        (n.reminders || []).map(remLine).join('; '), (n.links || []).join(' '), n.type]);
+    }
+    // The BOM makes Excel read Telugu and other non-English text correctly.
+    return '﻿' + rows.map(r => r.map(cell).join(',')).join('\r\n');
+  }
+
+  async function imagesAsDataUrls(notes) {
+    const out = {};
+    for (const n of notes) for (const a of n.attachments || []) {
+      if (a.kind !== 'image') continue;
+      const b = await DB.getBlob(a.blobId);
+      if (b) out[a.blobId] = await toDataUrl(b);
+    }
+    return out;
+  }
+
+  async function backupJSON(notes) {
     const blobs = {};
-    for (const { id, blob } of await DB.allBlobs()) blobs[id] = await toDataUrl(blob);
-    const data = { app: 'idea-organizer', version: 1, exportedAt: Date.now(), notes: state.notes, blobs };
+    for (const n of notes) for (const a of n.attachments || []) {
+      const b = await DB.getBlob(a.blobId);
+      if (b) blobs[a.blobId] = await toDataUrl(b);
+    }
+    return JSON.stringify({ app: 'idea-organizer', version: 1, exportedAt: Date.now(), notes, blobs });
+  }
+
+  async function buildFile(notes, fmt, title) {
+    const f = FORMATS[fmt];
+    const base = notes.length === 1 ? slug(notes[0].title) : `ideas-${slug(title)}-${stamp()}`;
+    let content;
+    if (fmt === 'doc') content = docHTML(notes, title, await imagesAsDataUrls(notes));
+    else if (fmt === 'txt') content = notes.map(noteText).join('\n\n' + '─'.repeat(30) + '\n\n');
+    else if (fmt === 'md') content = (notes.length > 1 ? `# ${title}\n\n` : '') + notes.map(noteMarkdown).join('\n\n---\n\n');
+    else if (fmt === 'csv') content = csvText(notes);
+    else content = await backupJSON(notes);
+    const name = fmt === 'json' ? `idea-organizer-backup-${stamp()}.json` : `${base}.${f.ext}`;
+    return new File([content], name, { type: f.mime });
+  }
+
+  async function attachmentFiles(notes) {
+    const files = [];
+    for (const n of notes) for (const a of n.attachments || []) {
+      if (a.kind === 'audio') continue;
+      const b = await DB.getBlob(a.blobId);
+      if (b) files.push(new File([b], a.name || 'photo.jpg', { type: a.mime || b.type }));
+    }
+    return files;
+  }
+
+  function download(file) {
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([JSON.stringify(data)], { type: 'application/json' }));
-    const d = new Date();
-    a.download = `idea-organizer-backup-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}.json`;
+    a.href = URL.createObjectURL(file);
+    a.download = file.name;
+    document.body.appendChild(a);
     a.click();
-    toast('Backup downloaded');
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  }
+
+  // Returns true when the share menu opened (or the user cancelled it).
+  async function shareFiles(files, title, text) {
+    const data = { files, title };
+    if (text) data.text = text;
+    if (navigator.canShare && navigator.canShare({ files })) {
+      try { await navigator.share(data); return true; } catch (e) { return e.name === 'AbortError'; }
+    }
+    return false;
+  }
+
+  function printNotes(notes, title, images) {
+    const frame = document.createElement('iframe');
+    frame.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0';
+    document.body.appendChild(frame);
+    frame.contentDocument.open();
+    frame.contentDocument.write(docHTML(notes, title, images));
+    frame.contentDocument.close();
+    setTimeout(() => {
+      frame.contentWindow.focus();
+      frame.contentWindow.print();
+      setTimeout(() => frame.remove(), 60000);
+    }, 400);
+  }
+
+  function openShare(notes, title) {
+    if (!notes.length) { toast('Nothing to share'); return; }
+    const one = notes.length === 1;
+    let fmt = 'doc';
+    const hasPhotos = notes.some(n => (n.attachments || []).some(a => a.kind === 'image'));
+    const canFiles = !!(navigator.canShare && navigator.canShare({ files: [new File(['x'], 'x.txt', { type: 'text/plain' })] }));
+    const fmtButtons = () => Object.entries(FORMATS).filter(([, f]) => !one || !f.many)
+      .map(([k, f]) => `<button class="chip ${k === fmt ? '' : 'tag'}" data-fmt="${k}">${f.label}</button>`).join('');
+    const SHARE_IC = '<svg viewBox="0 0 24 24"><circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="M8.2 10.8l7.6-4.4M8.2 13.2l7.6 4.4"/></svg>';
+    const WA_IC = '<svg viewBox="0 0 24 24"><path d="M4 20l1.3-4A8 8 0 1 1 8 18.7z"/><path d="M9 9.5c0 3 2.5 5.5 5.5 5.5l1-1.4-2-1-1 .9a4 4 0 0 1-2-2l.9-1-1-2z" fill="currentColor" stroke="none"/></svg>';
+    const MAIL_IC = '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></svg>';
+    const COPY_IC = '<svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>';
+    const PRINT_IC = '<svg viewBox="0 0 24 24"><path d="M7 9V3h10v6"/><rect x="3" y="9" width="18" height="8" rx="2"/><path d="M7 14h10v7H7z"/></svg>';
+    const DL_IC = '<svg viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>';
+
+    openSheet(`
+      <div class="sheet-head"><h2>${one ? 'Share memory' : `Share ${notes.length} memories`}</h2>
+        <button class="icon-btn" data-close aria-label="Close">${ICONS.close}</button></div>
+      ${one ? `<p class="muted small" style="margin-top:-8px">${esc(notes[0].title || 'Untitled memory')}</p>` : `<p class="muted small" style="margin-top:-8px">${esc(title)}</p>`}
+      <div class="share-grid">
+        <button id="shWa">${WA_IC}<span>WhatsApp</span></button>
+        <button id="shApps">${SHARE_IC}<span>Drive, Dropbox, Box…</span></button>
+        <button id="shMail">${MAIL_IC}<span>Email</span></button>
+        <button id="shCopy">${COPY_IC}<span>Copy text</span></button>
+      </div>
+      <label class="field">File format for Drive / Dropbox / Box and downloads</label>
+      <div class="chips" id="fmts">${fmtButtons()}</div>
+      <div class="row" style="margin-top:16px">
+        <button class="btn ghost grow" id="shPdf">${PRINT_IC} PDF / Print</button>
+        <button class="btn ghost grow" id="shDl">${DL_IC} Download file</button>
+      </div>
+      <p class="note-banner" style="text-align:left">"Drive, Dropbox, Box…" opens your phone's share menu: pick Google Drive, Dropbox, Box, Gmail, Telegram or any installed app.
+      ${hasPhotos ? 'Photos are sent along with the file.' : ''} ${canFiles ? '' : 'This browser can\'t share files, so it will download them instead.'}</p>
+    `, body => {
+      $('[data-close]', body).onclick = () => closeSheet();
+      const bindFmts = () => $$('[data-fmt]', body).forEach(b => b.onclick = () => { fmt = b.dataset.fmt; $('#fmts', body).innerHTML = fmtButtons(); bindFmts(); });
+      bindFmts();
+      const plain = () => notes.map(noteText).join('\n\n────────\n\n');
+
+      $('#shWa', body).onclick = async () => {
+        let text = plain();
+        // Photos can only reach WhatsApp through the share menu.
+        if (hasPhotos && canFiles) {
+          const files = await attachmentFiles(notes);
+          if (await shareFiles(files, title, text.slice(0, 4000))) return;
+        }
+        if (text.length > 3500) text = text.slice(0, 3400) + '\n…(shortened, use "Drive, Dropbox, Box…" to send the full file)';
+        window.open('https://wa.me/?text=' + encodeURIComponent(text), '_blank', 'noopener');
+      };
+
+      $('#shApps', body).onclick = async () => {
+        const file = await buildFile(notes, fmt, title);
+        const files = [file, ...(fmt === 'json' ? [] : await attachmentFiles(notes))];
+        if (await shareFiles(files, file.name, one ? notes[0].title : '')) return;
+        if (canFiles && await shareFiles([file], file.name)) return;
+        download(file);
+        toast(`Saved ${file.name}. Upload it from your Downloads folder.`, 4000);
+      };
+
+      $('#shMail', body).onclick = () => {
+        let text = plain();
+        if (text.length > 1800) text = text.slice(0, 1700) + '\n…(shortened)';
+        location.href = `mailto:?subject=${encodeURIComponent(one ? notes[0].title : title)}&body=${encodeURIComponent(text)}`;
+      };
+
+      $('#shCopy', body).onclick = async () => {
+        try { await navigator.clipboard.writeText(plain()); toast('Copied. Paste it anywhere.'); }
+        catch (e) { toast('Copy was blocked by the browser'); }
+      };
+
+      $('#shPdf', body).onclick = async () => {
+        toast('Opening print… choose "Save as PDF"', 3500);
+        printNotes(notes, one ? notes[0].title : title, await imagesAsDataUrls(notes));
+      };
+
+      $('#shDl', body).onclick = async () => {
+        const file = await buildFile(notes, fmt, title);
+        download(file);
+        toast(`Downloaded ${file.name}`);
+      };
+    }, true);
   }
 
   async function importBackup(file) {

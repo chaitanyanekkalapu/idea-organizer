@@ -199,6 +199,17 @@ mark { background: rgba(61, 220, 151, .25); color: var(--text); border-radius: 3
 .capture-types button.on { border-color: var(--accent); color: var(--text); }
 .capture-types svg { color: var(--accent); }
 
+.share-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 4px 0 8px; }
+.share-grid button {
+  background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px 4px;
+  display: grid; justify-items: center; gap: 6px; font-size: 12px; color: var(--muted); line-height: 1.2;
+}
+.share-grid button:active { border-color: var(--accent); }
+.share-grid svg { color: var(--accent); width: 26px; height: 26px; }
+.top .round-btn + .round-btn { margin-left: -2px; }
+.chips button.chip { border: 1px solid transparent; font: inherit; font-size: 14px; }
+.chips button.chip.tag { border-color: #2f5c48; }
+
 label.field { display: block; font-size: 13px; color: var(--muted); margin: 14px 0 6px; }
 .input, textarea.input, select.input {
   width: 100%; background: #1d2421; border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px;

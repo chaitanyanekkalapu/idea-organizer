@@ -1,6 +1,6 @@
 // Offline cache for the app shell. Bump VERSION whenever a file changes so
 // phones pick up the new copy.
-const VERSION = 'ideas-v2';
+const VERSION = 'ideas-v3';
 const SHELL = [
   './', 'index.html', 'styles.css', 'manifest.webmanifest',
   'js/db.js', 'js/smart.js', 'js/app.js',

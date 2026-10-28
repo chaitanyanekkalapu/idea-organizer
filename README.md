@@ -22,8 +22,18 @@ Friday morning", "book the hall on 5th Nov", "in 2 hours", or Telugu రేప�
 become dated reminders. Alerts fire while the app is open; for a guaranteed
 phone alarm tap the calendar icon to add it to Google Calendar.
 
-**Backup.** Settings (⋯) → Export backup saves a `.json` file with all notes and
-photos. Import it on another phone or after reinstalling.
+**Share / export.** Tap **Share** on a memory, or the share icon on the
+Memories screen to send the whole current view (folder, tag or search):
+
+- **WhatsApp:** sends the text (and photos, through the share menu)
+- **Drive, Dropbox, Box…:** opens the phone's share menu with a file; pick
+  Google Drive, Dropbox, Box, Gmail, Telegram or any installed app
+- **Email**, **Copy text**, **PDF / Print** (choose "Save as PDF")
+- **Download file** in Word, Text, Markdown, Spreadsheet (CSV) or
+  Backup (`.json`, re-importable)
+
+**Backup.** Share → Backup (re-importable) → Drive/Dropbox keeps a copy of all
+notes and photos. Settings (⋯) → Import backup restores it.
 
 ## Run on this PC
 
