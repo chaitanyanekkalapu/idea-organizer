@@ -15,7 +15,7 @@
     filterType: '',
     remTab: 'upcoming',
     askQuery: '',
-    settings: { lang: 'en-IN', saveAudio: true, fastMode: true },
+    settings: {},
   };
 
   // ---------- helpers -------------------------------------------------------
@@ -93,9 +93,6 @@
   // ---------- data ----------------------------------------------------------
   async function load() {
     state.notes = await DB.allNotes();
-    state.settings.lang = await DB.getSetting('lang', 'en-IN');
-    state.settings.saveAudio = await DB.getSetting('saveAudio', true);
-    state.settings.fastMode = await DB.getSetting('fastMode', true);
   }
 
   function folders() {
@@ -486,8 +483,6 @@
   $('#sheet').addEventListener('click', e => { if (e.target.dataset.close !== undefined) closeSheet(); });
 
   // ---------- Capture -------------------------------------------------------
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  const isAndroid = /Android/i.test(navigator.userAgent);
 
   function folderOptions(selected) {
     const names = [...new Set(['Inbox', ...folders().map(f => f[0])])];
@@ -496,31 +491,24 @@
 
   function openCapture(type = 'voice', autostart = false, replace = false) {
     const types = [['voice', 'Voice'], ['text', 'Type'], ['photo', 'Photo'], ['link', 'Link'], ['file', 'File']];
-    const lang = state.settings.lang;
     let inner = '';
     if (type === 'voice') {
       inner = `
         <div class="recorder">
-          <div class="lang-toggle" role="group" aria-label="Language">
-            <button data-lang="en-IN" class="${lang === 'en-IN' ? 'on' : ''}">English</button>
-            <button data-lang="te-IN" class="${lang === 'te-IN' ? 'on' : ''}">తెలుగు</button>
-          </div>
           <button class="rec-btn" id="rec" aria-label="Start recording">${ICONS.voice}</button>
           <div class="rec-time" id="recTime">0:00</div>
           <div class="meter" id="meter" aria-hidden="true">${'<i></i>'.repeat(28)}</div>
-          <div class="rec-hint" id="recHint">${SR ? 'Tap to start. Speak naturally, then tap again to stop.' : 'Voice-to-text is not supported in this browser. Use Chrome, or type below.'}</div>
-          <div class="rec-mode small muted" id="recMode">${state.settings.saveAudio ? '🎧 Saves the recording + transcript' : 'Transcript only (recording off in ⋯ Settings)'}</div>
+          <div class="rec-hint" id="recHint">Tap to record. Tap again to stop.</div>
           <div class="rec-alt">
             <label class="btn ghost small">📱 Phone recorder<input type="file" id="phoneRec" accept="audio/*" capture hidden></label>
             <label class="btn ghost small">📂 Import audio<input type="file" id="importRec" accept="audio/*,.m4a,.mp3,.aac,.wav,.ogg,.opus,.amr,.3gp" hidden></label>
             <button class="btn ghost small" id="pasteBtn" type="button">📋 Paste transcript</button>
           </div>
-          <div class="rec-hint small">Using NeoSapien? Open the memory there → <b>Share</b> → <b>Idea Organizer</b>. Or copy its transcript and tap Paste.</div>
+          <div class="rec-hint small">For a transcript, use NeoSapien: open the memory there → <b>Share</b> → <b>Idea Organizer</b>. Or copy its transcript and tap Paste.</div>
         </div>
-        <label class="field" for="body">Transcript (you can edit it)</label>
-        <textarea class="input" id="body" placeholder="Your words appear here…"></textarea>
-        <div class="interim small" id="interim"></div>
-        <div id="recAudio"></div>`;
+        <div id="recAudio"></div>
+        <label class="field" for="body">Notes / transcript (optional)</label>
+        <textarea class="input" id="body" placeholder="Paste the NeoSapien transcript, or type key points…"></textarea>`;
     } else if (type === 'text') {
       inner = `<div class="row" style="justify-content:flex-end"><button class="btn ghost small" id="pasteBtn" type="button">📋 Paste</button></div>
         <label class="field" for="body">Your note</label>
@@ -615,7 +603,7 @@
         if (type === 'link') title = prettyUrl(url);
         else if (type === 'file' && files[0]) title = files[0].name;
         else if (type === 'photo') title = `Photo · ${shortDate(now)}`;
-        else title = 'Voice memory';
+        else title = `Voice note · ${shortDate(now)}, ${time(new Date(now))}`;
       }
       const folderInput = $('#folder', body).value.trim();
       const note = {
@@ -625,7 +613,6 @@
         tags: smart.tags, reminders: smart.reminders,
         links: url ? [url] : [], attachments,
         duration: rec ? rec.seconds() : 0,
-        lang: type === 'voice' ? state.settings.lang : undefined,
       };
       await saveNote(note);
       closeSheet();
@@ -659,45 +646,8 @@
     });
   }
 
-  // Voice capture: records the audio and transcribes it live.
-  //
-  // Speed: the recognizer runs in continuous mode with interim results, and a
-  // replacement starts the moment one ends, so text shows up as you speak.
-  // Where Chrome offers on-device recognition (processLocally) it is used,
-  // which skips the network round trip.
-  //
-  // Recording + transcript: the mic is opened once with getUserMedia; the same
-  // track feeds MediaRecorder and, via start(track), the recognizer. Phones
-  // whose Chrome can't share the mic that way fall back to transcript-only and
-  // remember it (localStorage 'srTrack' = 'bad').
-  //
-  // Every event rebuilds the session text from all results, final or not:
-  // Android often never marks the last words final, and in continuous mode it
-  // can repeat earlier text, which sessionText() collapses.
-  const localVoice = {};  // lang -> 'available' | 'downloadable' | 'unavailable'
-
-  async function checkLocalVoice(lang) {
-    if (!SR || typeof SR.available !== 'function') return 'unavailable';
-    if (localVoice[lang]) return localVoice[lang];
-    try { localVoice[lang] = await SR.available({ langs: [lang], processLocally: true }); }
-    catch (e) { localVoice[lang] = 'unavailable'; }
-    return localVoice[lang];
-  }
-
-  function sessionText(results) {
-    const parts = [];
-    for (let i = 0; i < results.length; i++) {
-      const t = (results[i][0] && results[i][0].transcript || '').trim();
-      if (!t) continue;
-      const last = parts[parts.length - 1];
-      const tl = t.toLowerCase(), ll = last && last.toLowerCase();
-      if (last && tl.startsWith(ll)) parts[parts.length - 1] = t;  // grew: replace
-      else if (last && ll.startsWith(tl)) continue;                 // repeat of a prefix
-      else parts.push(t);
-    }
-    return parts.join(' ');
-  }
-
+  // Voice capture: an audio recorder. Transcripts come from NeoSapien (shared
+  // in or pasted), so the mic is used only for recording.
   function pickAudioType() {
     for (const t of ['audio/mp4;codecs=mp4a.40.2', 'audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus']) {
       if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) return t;
@@ -705,41 +655,32 @@
     return '';
   }
 
-  const srTrackState = () => { try { return localStorage.getItem('srTrack') || ''; } catch (e) { return ''; } };
-  const setSrTrackState = v => { try { localStorage.setItem('srTrack', v); } catch (e) {} };
+  const audioDuration = blob => new Promise(resolve => {
+    const a = new Audio();
+    a.preload = 'metadata';
+    a.onloadedmetadata = () => resolve(isFinite(a.duration) ? a.duration : 0);
+    a.onerror = () => resolve(0);
+    a.src = URL.createObjectURL(blob);
+  });
 
   function setupRecorder(body, autostart) {
     const btn = $('#rec', body);
-    const ta = $('#body', body);
-    const status = $('#interim', body);
     const hint = $('#recHint', body);
-    const modeEl = $('#recMode', body);
     const timeEl = $('#recTime', body);
     const bars = $$('#meter i', body);
     const audioBox = $('#recAudio', body);
 
     let live = false, startedAt = 0, elapsed = 0, timer = null;
-    let recog = null, recogGen = 0, useTrack = false, useLocal = false;
     let stream = null, recorder = null, chunks = [], clips = [], audioType = '';
-    let actx = null, analyser = null, raf = 0, peak = 0, meterLive = false;
-    let base = '', current = '', heardAny = false, lastResultAt = 0;
-
-    const join = (a, b) => [a.trim(), b.trim()].filter(Boolean).join(' ');
-    const show = () => { ta.value = join(base, current); ta.scrollTop = ta.scrollHeight; };
-    const commit = () => { base = join(base, current); current = ''; };
-    const setStatus = msg => { status.textContent = msg; };
-
-    $$('[data-lang]', body).forEach(b => b.onclick = async () => {
-      state.settings.lang = b.dataset.lang;
-      await DB.setSetting('lang', b.dataset.lang);
-      $$('[data-lang]', body).forEach(x => x.classList.toggle('on', x === b));
-      // Switch the recognizer's language without stopping the recording.
-      if (live && SR) { useLocal = await wantLocal(); restartRecognizer(); }
-    });
+    let actx = null, analyser = null, raf = 0;
 
     function tick() {
       const s = Math.floor((elapsed + (live ? Date.now() - startedAt : 0)) / 1000);
       timeEl.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+    }
+
+    function renderClips() {
+      audioBox.innerHTML = clips.map(c => `<div class="attach"><audio controls preload="metadata" src="${URL.createObjectURL(c)}"></audio></div>`).join('');
     }
 
     // Live level meter so you can see the mic is picking you up.
@@ -762,10 +703,8 @@
         analyser.getByteTimeDomainData(data);
         let sum = 0;
         for (const v of data) sum += ((v - 128) / 128) ** 2;
-        const rms = Math.sqrt(sum / data.length);
-        if (actx && actx.state === 'running') { meterLive = true; peak = Math.max(peak, rms); }
         levels.shift();
-        levels.push(Math.min(1, rms * 6));
+        levels.push(Math.min(1, Math.sqrt(sum / data.length) * 6));
         bars.forEach((b, i) => { b.style.transform = `scaleY(${Math.max(0.08, levels[i])})`; });
       };
       raf = requestAnimationFrame(loop);
@@ -777,182 +716,39 @@
       if (actx) { actx.close().catch(() => {}); actx = null; }
     }
 
-    async function wantLocal() {
-      if (!state.settings.fastMode) return false;
-      return (await checkLocalVoice(state.settings.lang)) === 'available';
-    }
-
-    function newRecognizer() {
-      const gen = ++recogGen;
-      const r = new SR();
-      r.lang = state.settings.lang;
-      r.continuous = true;
-      r.interimResults = true;
-      r.maxAlternatives = 1;
-      if (useLocal) { try { r.processLocally = true; } catch (e) {} }
-      r.onstart = () => { if (gen === recogGen && !heardAny) setStatus('🎙️ Listening…'); };
-      r.onresult = e => {
-        if (gen !== recogGen) return;
-        heardAny = true;
-        lastResultAt = Date.now();
-        current = sessionText(e.results);
-        show();
-        setStatus('🟢 Hearing you…');
-      };
-      r.onerror = e => {
-        if (gen !== recogGen || e.error === 'aborted' || e.error === 'no-speech') return;
-        if (useTrack && (e.error === 'audio-capture' || e.error === 'not-allowed' || e.error === 'bad-grammar' || e.error === 'invalid-state')) {
-          // This Chrome can't transcribe from our shared track: transcript wins.
-          setSrTrackState('bad');
-          fallbackToTranscriptOnly();
-          return;
-        }
-        if (useLocal && (e.error === 'language-not-supported' || e.error === 'service-not-allowed')) {
-          localVoice[state.settings.lang] = 'unavailable';
-          useLocal = false;
-          restartRecognizer();
-          return;
-        }
-        const msg = {
-          'not-allowed': 'Microphone is blocked. Tap the 🔒 next to the address (or App info → Permissions) and allow Microphone.',
-          'service-not-allowed': 'Chrome\'s voice service is off. Check that the Google app is installed and enabled, then try again.',
-          'audio-capture': 'No microphone found, or another app is using it. Close other recording apps and try again.',
-          'network': 'Voice-to-text needs internet for this language. Check your connection, or type instead.',
-          'language-not-supported': 'This language isn\'t available for voice on this phone. Switch to English, or add the language in Google voice settings.',
-        }[e.error] || 'Voice error: ' + e.error;
-        hint.textContent = msg;
-        setStatus(recorder ? '🎧 Still recording audio' : '');
-        if (!recorder) stop();
-      };
-      r.onend = () => {
-        if (gen !== recogGen) return;
-        commit();
-        show();
-        if (live) startRecognizer();  // restart at once, no gap
-      };
-      return r;
-    }
-
-    function startRecognizer() {
-      recog = newRecognizer();
-      const track = useTrack && stream && stream.getAudioTracks()[0];
-      try {
-        if (track && track.readyState === 'live') recog.start(track); else recog.start();
-      } catch (e) {
-        if (track) {
-          // start(track) isn't supported here.
-          setSrTrackState('bad');
-          fallbackToTranscriptOnly();
-        } else {
-          setTimeout(() => { if (live) startRecognizer(); }, 150);
-        }
-      }
-    }
-
-    function restartRecognizer() {
-      if (recog) { recogGen++; try { recog.abort(); } catch (e) {} }
-      commit();
-      startRecognizer();
-    }
-
-    // Keep whatever audio was captured so far, release the mic, and continue
-    // with the recognizer using its own mic access.
-    function fallbackToTranscriptOnly() {
-      useTrack = false;
-      stopRecorder().then(() => {
-        modeEl.textContent = 'Transcript only: this phone can\'t record audio and transcribe at the same time.';
-        if (live) restartRecognizer();
-      });
-    }
-
-    function stopRecorder() {
-      return new Promise(resolve => {
-        stopMeter();
-        const done = () => {
-          if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
-          resolve();
-        };
-        if (recorder && recorder.state !== 'inactive') {
-          recorder.onstop = () => {
-            if (chunks.length) clips.push(new Blob(chunks, { type: (recorder.mimeType || audioType || 'audio/webm').split(';')[0] }));
-            chunks = [];
-            recorder = null;
-            done();
-          };
-          try { recorder.requestData(); } catch (e) {}
-          recorder.stop();
-        } else { recorder = null; done(); }
-      });
-    }
-
     async function start() {
-      if (!SR && !state.settings.saveAudio) { toast('Voice-to-text needs Chrome. Type your note instead.'); ta.focus(); return; }
-      base = ta.value.trim();
-      current = '';
-      peak = 0;
-      meterLive = false;
+      if (!window.MediaRecorder || !navigator.mediaDevices) {
+        hint.textContent = 'This browser can\'t record. Use 📱 Phone recorder instead.';
+        return;
+      }
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      } catch (e) {
+        hint.textContent = e.name === 'NotAllowedError'
+          ? 'Microphone is blocked. Tap the 🔒 next to the address (or App info → Permissions) and allow Microphone.'
+          : 'Could not open the microphone. Close other recording apps, or use 📱 Phone recorder.';
+        return;
+      }
+      audioType = pickAudioType();
+      try {
+        recorder = audioType ? new MediaRecorder(stream, { mimeType: audioType, audioBitsPerSecond: 96000 }) : new MediaRecorder(stream);
+      } catch (e) {
+        stream.getTracks().forEach(t => t.stop());
+        stream = null;
+        hint.textContent = 'Could not start recording. Use 📱 Phone recorder instead.';
+        return;
+      }
+      chunks = [];
+      recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+      recorder.start(1000);
       live = true;
       startedAt = Date.now();
+      timer = setInterval(tick, 250);
       btn.classList.add('live');
       btn.innerHTML = ICONS.stop;
       btn.setAttribute('aria-label', 'Stop recording');
-      hint.textContent = 'Tap to stop';
-      setStatus('Starting mic…');
-      timer = setInterval(tick, 250);
-
-      const wantAudio = state.settings.saveAudio && window.MediaRecorder;
-      // Without recording, Android gets the mic to itself (most reliable);
-      // elsewhere we still open it for the level meter.
-      const wantStream = wantAudio || !isAndroid;
-      const [, local] = await Promise.all([
-        (async () => {
-          if (!wantStream) return;
-          try {
-            stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-          } catch (e) {
-            if (e.name === 'NotAllowedError') { hint.textContent = 'Microphone is blocked. Tap the 🔒 next to the address (or App info → Permissions) and allow Microphone.'; }
-            stream = null;
-          }
-        })(),
-        SR ? wantLocal() : Promise.resolve(false),
-      ]);
-      if (!live) { if (stream) stream.getTracks().forEach(t => t.stop()); stream = null; return; }
-      useLocal = local;
-
-      if (wantAudio && stream) {
-        audioType = pickAudioType();
-        try {
-          recorder = audioType ? new MediaRecorder(stream, { mimeType: audioType, audioBitsPerSecond: 64000 }) : new MediaRecorder(stream);
-          chunks = [];
-          recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
-          recorder.start(1000);
-        } catch (e) { recorder = null; }
-      }
+      hint.textContent = 'Recording… tap to stop';
       startMeter();
-
-      if (SR) {
-        // Share the recording's track with the recognizer unless this phone
-        // already showed it can't; on Android without a track the recognizer
-        // would fight the recorder for the mic.
-        useTrack = !!(stream && srTrackState() !== 'bad');
-        if (recorder && !useTrack && isAndroid) {
-          // Known not to work together here: keep the transcript.
-          await stopRecorder();
-          modeEl.textContent = 'Transcript only: this phone can\'t record audio and transcribe at the same time.';
-        }
-        startRecognizer();
-        modeEl.textContent = (recorder ? '🎧 Recording + transcript' : 'Transcript only') + (useLocal ? ' · ⚡ fast offline voice' : '');
-        // If the shared track gives no words after clear speech, fall back.
-        if (useTrack && srTrackState() !== 'ok') {
-          setTimeout(() => {
-            if (!live || !useTrack) return;
-            if (heardAny) setSrTrackState('ok');
-            else if (meterLive && peak > 0.05) { setSrTrackState('bad'); fallbackToTranscriptOnly(); setStatus('Switching to transcript-only mode…'); }
-          }, 6000);
-        }
-      } else {
-        setStatus(recorder ? '🎧 Recording audio (no transcript in this browser)' : '');
-      }
     }
 
     function stop() {
@@ -965,151 +761,30 @@
         btn.classList.remove('live');
         btn.innerHTML = ICONS.voice;
         btn.setAttribute('aria-label', 'Start recording');
-        if (!/blocked|off|microphone|internet|language|error|start/i.test(hint.textContent)) hint.textContent = 'Paused. Tap to continue, or Save.';
-        // stop() (not abort) lets the recognizer flush its last words.
-        if (recog) { try { recog.stop(); } catch (e) {} }
-        setTimeout(() => {
-          recogGen++;
-          commit();
-          show();
-          setStatus(ta.value || heardAny ? '' : 'No words were picked up. Try again, speaking a little louder.');
-        }, 500);
-        stopRecorder().then(() => {
-          // A silent clip means this phone gave the recorder no sound while
-          // the recognizer had the mic: drop it and go transcript-only next time.
-          if (clips.length && meterLive && peak < 0.004 && heardAny) {
-            clips.pop();
-            setSrTrackState('bad');
-            modeEl.textContent = 'Transcript only: this phone can\'t record audio and transcribe at the same time.';
-          }
+        hint.textContent = 'Saved below. Tap to record more, or Save memory.';
+        stopMeter();
+        recorder.onstop = () => {
+          if (chunks.length) clips.push(new Blob(chunks, { type: (recorder.mimeType || audioType || 'audio/webm').split(';')[0] }));
+          chunks = [];
+          recorder = null;
+          if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
           renderClips();
           resolve();
-        });
+        };
+        try { recorder.requestData(); } catch (e) {}
+        recorder.stop();
       });
     }
 
-    function renderClips() {
-      audioBox.innerHTML = clips.map(c => `<div class="attach"><audio controls preload="metadata" src="${URL.createObjectURL(c)}"></audio></div>`).join('');
-    }
-
-    // ---- Recordings made by the phone's own recorder app (or imported) ----
-    // The file is kept as-is (full quality) and played silently into the
-    // recognizer through a Web Audio track to build the transcript.
-    let fileJob = null;
-
-    const audioDuration = blob => new Promise(resolve => {
-      const a = new Audio();
-      a.preload = 'metadata';
-      a.onloadedmetadata = () => resolve(isFinite(a.duration) ? a.duration : 0);
-      a.onerror = () => resolve(0);
-      a.src = URL.createObjectURL(blob);
-    });
-
+    // Recordings made by the phone's own recorder app, or imported files,
+    // are kept exactly as they are.
     async function addRecordingFile(file) {
       if (live) await stop();
-      if (fileJob) fileJob.cancel();
       clips.push(file);
-      const dur = await audioDuration(file);
-      elapsed += dur * 1000;
+      elapsed += (await audioDuration(file)) * 1000;
       tick();
       renderClips();
-      modeEl.textContent = `📱 Recording added${dur ? ' (' + durLabel(dur) + ')' : ''}`;
-      if (!SR) { setStatus('Recording saved. This browser can\'t make a transcript; type key points in the box.'); return; }
-      transcribeFile(file, dur);
-    }
-
-    async function transcribeFile(file, dur) {
-      const el = new Audio(URL.createObjectURL(file));
-      let ctx, track;
-      try {
-        ctx = new AudioContext();
-        const src = ctx.createMediaElementSource(el);
-        const dest = ctx.createMediaStreamDestination();
-        src.connect(dest);   // not connected to the speakers: plays silently
-        track = dest.stream.getAudioTracks()[0];
-      } catch (e) {
-        setStatus('Recording saved, but this phone can\'t make a transcript from it.');
-        return;
-      }
-      const local = await wantLocal();
-      base = ta.value.trim();
-      current = '';
-      let done = false, r = null, gotText = false, gen = 0;
-
-      audioBox.insertAdjacentHTML('beforeend', `<div id="fileJob"><div class="progress"><i></i></div>
-        <div class="row" style="margin-top:8px"><span class="small muted grow" id="fileMsg">Transcribing the recording…</span>
-        <button class="btn ghost small" id="fileGo" hidden>▶ Tap to transcribe</button>
-        <button class="btn ghost small" id="fileStop">Stop</button></div></div>`);
-      const box = $('#fileJob', body), bar = $('.progress i', box), msg = $('#fileMsg', box), go = $('#fileGo', box);
-      btn.disabled = true;
-
-      const finish = text => {
-        if (done) return;
-        done = true;
-        el.pause();
-        try { r && r.stop(); } catch (e) {}
-        setTimeout(() => { commit(); show(); ctx.close().catch(() => {}); }, 300);
-        btn.disabled = false;
-        fileJob = null;
-        box.innerHTML = `<p class="small muted">${esc(text)}</p>`;
-      };
-
-      const startRecognizer = () => {
-        const my = ++gen;
-        r = new SR();
-        r.lang = state.settings.lang;
-        r.continuous = true;
-        r.interimResults = true;
-        if (local) { try { r.processLocally = true; } catch (e) {} }
-        r.onresult = e => {
-          if (my !== gen) return;
-          gotText = true;
-          current = sessionText(e.results);
-          show();
-        };
-        r.onerror = e => {
-          if (my !== gen || e.error === 'aborted' || e.error === 'no-speech') return;
-          finish(e.error === 'network' ? 'Transcript needs internet for this language. The recording is saved.' : 'Transcript stopped (' + e.error + '). The recording is saved.');
-        };
-        r.onend = () => {
-          if (my !== gen) return;
-          commit();
-          show();
-          if (!done) startRecognizer();
-        };
-        try { r.start(track); }
-        catch (e) {
-          finish('This phone\'s Chrome can\'t turn a recording file into text yet. The recording is saved; use the in-app mic for a live transcript, or type key points.');
-        }
-      };
-
-      el.ontimeupdate = () => {
-        if (!dur) return;
-        bar.style.width = Math.min(100, (el.currentTime / dur) * 100) + '%';
-        msg.textContent = `Transcribing… ${Math.round(el.currentTime)}s of ${Math.round(dur)}s`;
-      };
-      el.onended = () => setTimeout(() => {
-        bar.style.width = '100%';
-        finish(gotText ? '✅ Transcript ready. Check and edit it above.' : 'No words were recognised in this recording. Check the language (English / తెలుగు) and try Import again.');
-      }, 1200);
-
-      $('#fileStop', box).onclick = () => finish(gotText ? 'Stopped. Partial transcript kept above.' : 'Stopped. The recording is saved.');
-      fileJob = { cancel: () => finish('Cancelled.') };
-
-      const begin = async () => {
-        go.hidden = true;
-        await ctx.resume().catch(() => {});
-        await el.play();
-        startRecognizer();
-      };
-      // Coming back from the recorder app may not count as a tap, in which
-      // case the browser blocks playback until the user taps.
-      try { await begin(); }
-      catch (e) {
-        go.hidden = false;
-        msg.textContent = 'Ready to transcribe.';
-        go.onclick = () => begin().catch(() => finish('Could not play this recording. It is saved; type key points in the box.'));
-      }
+      hint.textContent = 'Recording added. Save memory when ready.';
     }
 
     for (const id of ['#phoneRec', '#importRec']) {
@@ -1118,19 +793,15 @@
     }
 
     btn.onclick = () => (live ? stop() : start());
-    ta.addEventListener('input', () => { if (!live) base = ta.value; });
     if (autostart) setTimeout(start, 120);
 
     return {
       active: () => live,
-      stop: async () => { await stop(); await new Promise(r => setTimeout(r, 550)); },
+      stop,
       abort: () => {
-        if (fileJob) fileJob.cancel();
         live = false;
-        recogGen++;
         clearInterval(timer);
         stopMeter();
-        try { recog && recog.abort(); } catch (e) {}
         if (recorder && recorder.state !== 'inactive') try { recorder.stop(); } catch (e) {}
         if (stream) stream.getTracks().forEach(t => t.stop());
       },
@@ -1266,10 +937,6 @@
         <button id="exp">${ICONS.file} Export / share all<span class="count">${state.notes.length} notes</span></button>
         <button id="imp">${ICONS.file} Import backup<input type="file" id="impFile" accept="application/json,.json" hidden></button>
         <button id="ntf">${ICONS.bell} Reminder alerts<span class="count">${perm === 'granted' ? 'On' : perm === 'denied' ? 'Blocked' : perm === 'unsupported' ? 'Not supported' : 'Off'}</span></button>
-        <button id="aud">${ICONS.voice} Save voice recordings<span class="count">${state.settings.saveAudio ? 'On' : 'Off'}</span></button>
-        ${srTrackState() === 'bad' ? `<button id="retryBoth">${ICONS.voice} Retry recording + transcript together<span class="count">Off on this phone</span></button>` : ''}
-        <button id="fast">⚡ Fast voice (offline when available)<span class="count">${state.settings.fastMode ? 'On' : 'Off'}</span></button>
-        <div id="packs"></div>
       </div>
       <hr class="sep">
       <p class="small muted"><b>AI upgrade:</b> not connected. Titles, summaries, tags and reminders come from the on-device rules engine.
@@ -1287,40 +954,6 @@
         else if (perm === 'denied') toast('Alerts are blocked. Allow notifications in the browser site settings.');
         openMoreMenu();
       };
-      $('#aud', body).onclick = async () => {
-        state.settings.saveAudio = !state.settings.saveAudio;
-        await DB.setSetting('saveAudio', state.settings.saveAudio);
-        openMoreMenu();
-      };
-      const rb = $('#retryBoth', body);
-      if (rb) rb.onclick = () => { setSrTrackState(''); toast('Will try recording + transcript together next time'); openMoreMenu(); };
-      $('#fast', body).onclick = async () => {
-        state.settings.fastMode = !state.settings.fastMode;
-        await DB.setSetting('fastMode', state.settings.fastMode);
-        openMoreMenu();
-      };
-      // Offline voice packs: only shown when this Chrome supports them.
-      (async () => {
-        if (!state.settings.fastMode || !SR || typeof SR.available !== 'function') return;
-        const rows = [];
-        for (const [lang, label] of [['en-IN', 'English'], ['te-IN', 'తెలుగు']]) {
-          const st = await checkLocalVoice(lang);
-          if (st === 'downloadable' || st === 'downloading') rows.push(`<button data-pack="${lang}">⬇️ Download offline voice: ${label}<span class="count">${st === 'downloading' ? 'Downloading…' : 'Faster'}</span></button>`);
-          else if (st === 'available') rows.push(`<button disabled>✅ Offline voice ready: ${label}<span class="count">Fast</span></button>`);
-        }
-        const box = $('#packs', body);
-        if (!box) return;
-        box.innerHTML = rows.join('');
-        $$('[data-pack]', box).forEach(b => b.onclick = async () => {
-          b.querySelector('.count').textContent = 'Downloading…';
-          try {
-            const ok = await SR.install({ langs: [b.dataset.pack], processLocally: true });
-            delete localVoice[b.dataset.pack];
-            toast(ok ? 'Offline voice ready' : 'This voice pack is not available on this phone');
-          } catch (e) { toast('Could not download the voice pack'); }
-          openMoreMenu();
-        });
-      })();
       $('#wipe', body).onclick = async () => {
         if (!confirm('Delete ALL memories and files on this device?')) return;
         if (!confirm('Really delete everything? Export a backup first if unsure.')) return;

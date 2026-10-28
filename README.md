@@ -14,8 +14,10 @@ all data stays on the phone.
 | Memories | All notes grouped by day, folder picker, search box, filter by type or tag |
 | Reminders | Scheduled / No date / Done, tick to complete, one tap to add to Google Calendar |
 
-**Voice.** Uses Chrome's built-in speech recognition (needs internet). Pick
-English or తెలుగు before recording. Mixed Tenglish works best in English mode.
+**Voice.** A plain audio recorder (no built-in speech-to-text: the phone
+couldn't record and transcribe at the same time). Record in the app, use
+📱 Phone recorder to record with the phone's own recorder app, or 📂 Import
+audio. Transcripts come from NeoSapien (see below) or 📋 Paste.
 
 **Reminders.** Phrases such as "call Ravi tomorrow at 5", "send the chart on
 Friday morning", "book the hall on 5th Nov", "in 2 hours", or Telugu రేపు / ఉదయం
