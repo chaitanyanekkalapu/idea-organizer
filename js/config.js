@@ -2,5 +2,5 @@
 // only identifies this app to Google. Create one at
 // https://console.cloud.google.com/apis/credentials (see README → Google Drive backup).
 window.IDEAS_CONFIG = {
-  googleClientId: '',
+  googleClientId: '262841357221-rgb9v2vibcoimkcahtdsv2aqjpok26qg.apps.googleusercontent.com',
 };
