@@ -510,6 +510,11 @@
           <div class="meter" id="meter" aria-hidden="true">${'<i></i>'.repeat(28)}</div>
           <div class="rec-hint" id="recHint">${SR ? 'Tap to start. Speak naturally, then tap again to stop.' : 'Voice-to-text is not supported in this browser. Use Chrome, or type below.'}</div>
           <div class="rec-mode small muted" id="recMode">${state.settings.saveAudio ? '🎧 Saves the recording + transcript' : 'Transcript only (recording off in ⋯ Settings)'}</div>
+          <div class="rec-alt">
+            <label class="btn ghost small">📱 Phone recorder<input type="file" id="phoneRec" accept="audio/*" capture hidden></label>
+            <label class="btn ghost small">📂 Import audio<input type="file" id="importRec" accept="audio/*,.m4a,.mp3,.aac,.wav,.ogg,.opus,.amr,.3gp" hidden></label>
+          </div>
+          <div class="rec-hint small">Best quality: record with your phone's recorder app, then the transcript is made from the file.</div>
         </div>
         <label class="field" for="body">Transcript (you can edit it)</label>
         <textarea class="input" id="body" placeholder="Your words appear here…"></textarea>
@@ -583,7 +588,7 @@
       for (const [i, audio] of clips.entries()) {
         const ext = /mp4|m4a|aac/.test(audio.type) ? 'm4a' : /ogg/.test(audio.type) ? 'ogg' : 'webm';
         const d = new Date(now);
-        const name = `voice-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}-${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}${clips.length > 1 ? '-' + (i + 1) : ''}.${ext}`;
+        const name = audio.name || `voice-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}-${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}${clips.length > 1 ? '-' + (i + 1) : ''}.${ext}`;
         attachments.push({ kind: 'audio', name, mime: audio.type, size: audio.size, blobId: await DB.putBlob(audio) });
       }
 
@@ -959,10 +964,139 @@
             setSrTrackState('bad');
             modeEl.textContent = 'Transcript only: this phone can\'t record audio and transcribe at the same time.';
           }
-          audioBox.innerHTML = clips.map(c => `<div class="attach"><audio controls src="${URL.createObjectURL(c)}"></audio></div>`).join('');
+          renderClips();
           resolve();
         });
       });
+    }
+
+    function renderClips() {
+      audioBox.innerHTML = clips.map(c => `<div class="attach"><audio controls preload="metadata" src="${URL.createObjectURL(c)}"></audio></div>`).join('');
+    }
+
+    // ---- Recordings made by the phone's own recorder app (or imported) ----
+    // The file is kept as-is (full quality) and played silently into the
+    // recognizer through a Web Audio track to build the transcript.
+    let fileJob = null;
+
+    const audioDuration = blob => new Promise(resolve => {
+      const a = new Audio();
+      a.preload = 'metadata';
+      a.onloadedmetadata = () => resolve(isFinite(a.duration) ? a.duration : 0);
+      a.onerror = () => resolve(0);
+      a.src = URL.createObjectURL(blob);
+    });
+
+    async function addRecordingFile(file) {
+      if (live) await stop();
+      if (fileJob) fileJob.cancel();
+      clips.push(file);
+      const dur = await audioDuration(file);
+      elapsed += dur * 1000;
+      tick();
+      renderClips();
+      modeEl.textContent = `📱 Recording added${dur ? ' (' + durLabel(dur) + ')' : ''}`;
+      if (!SR) { setStatus('Recording saved. This browser can\'t make a transcript; type key points in the box.'); return; }
+      transcribeFile(file, dur);
+    }
+
+    async function transcribeFile(file, dur) {
+      const el = new Audio(URL.createObjectURL(file));
+      let ctx, track;
+      try {
+        ctx = new AudioContext();
+        const src = ctx.createMediaElementSource(el);
+        const dest = ctx.createMediaStreamDestination();
+        src.connect(dest);   // not connected to the speakers: plays silently
+        track = dest.stream.getAudioTracks()[0];
+      } catch (e) {
+        setStatus('Recording saved, but this phone can\'t make a transcript from it.');
+        return;
+      }
+      const local = await wantLocal();
+      base = ta.value.trim();
+      current = '';
+      let done = false, r = null, gotText = false, gen = 0;
+
+      audioBox.insertAdjacentHTML('beforeend', `<div id="fileJob"><div class="progress"><i></i></div>
+        <div class="row" style="margin-top:8px"><span class="small muted grow" id="fileMsg">Transcribing the recording…</span>
+        <button class="btn ghost small" id="fileGo" hidden>▶ Tap to transcribe</button>
+        <button class="btn ghost small" id="fileStop">Stop</button></div></div>`);
+      const box = $('#fileJob', body), bar = $('.progress i', box), msg = $('#fileMsg', box), go = $('#fileGo', box);
+      btn.disabled = true;
+
+      const finish = text => {
+        if (done) return;
+        done = true;
+        el.pause();
+        try { r && r.stop(); } catch (e) {}
+        setTimeout(() => { commit(); show(); ctx.close().catch(() => {}); }, 300);
+        btn.disabled = false;
+        fileJob = null;
+        box.innerHTML = `<p class="small muted">${esc(text)}</p>`;
+      };
+
+      const startRecognizer = () => {
+        const my = ++gen;
+        r = new SR();
+        r.lang = state.settings.lang;
+        r.continuous = true;
+        r.interimResults = true;
+        if (local) { try { r.processLocally = true; } catch (e) {} }
+        r.onresult = e => {
+          if (my !== gen) return;
+          gotText = true;
+          current = sessionText(e.results);
+          show();
+        };
+        r.onerror = e => {
+          if (my !== gen || e.error === 'aborted' || e.error === 'no-speech') return;
+          finish(e.error === 'network' ? 'Transcript needs internet for this language. The recording is saved.' : 'Transcript stopped (' + e.error + '). The recording is saved.');
+        };
+        r.onend = () => {
+          if (my !== gen) return;
+          commit();
+          show();
+          if (!done) startRecognizer();
+        };
+        try { r.start(track); }
+        catch (e) {
+          finish('This phone\'s Chrome can\'t turn a recording file into text yet. The recording is saved; use the in-app mic for a live transcript, or type key points.');
+        }
+      };
+
+      el.ontimeupdate = () => {
+        if (!dur) return;
+        bar.style.width = Math.min(100, (el.currentTime / dur) * 100) + '%';
+        msg.textContent = `Transcribing… ${Math.round(el.currentTime)}s of ${Math.round(dur)}s`;
+      };
+      el.onended = () => setTimeout(() => {
+        bar.style.width = '100%';
+        finish(gotText ? '✅ Transcript ready. Check and edit it above.' : 'No words were recognised in this recording. Check the language (English / తెలుగు) and try Import again.');
+      }, 1200);
+
+      $('#fileStop', box).onclick = () => finish(gotText ? 'Stopped. Partial transcript kept above.' : 'Stopped. The recording is saved.');
+      fileJob = { cancel: () => finish('Cancelled.') };
+
+      const begin = async () => {
+        go.hidden = true;
+        await ctx.resume().catch(() => {});
+        await el.play();
+        startRecognizer();
+      };
+      // Coming back from the recorder app may not count as a tap, in which
+      // case the browser blocks playback until the user taps.
+      try { await begin(); }
+      catch (e) {
+        go.hidden = false;
+        msg.textContent = 'Ready to transcribe.';
+        go.onclick = () => begin().catch(() => finish('Could not play this recording. It is saved; type key points in the box.'));
+      }
+    }
+
+    for (const id of ['#phoneRec', '#importRec']) {
+      const inp = $(id, body);
+      if (inp) inp.onchange = () => { const f = inp.files[0]; inp.value = ''; if (f) addRecordingFile(f); };
     }
 
     btn.onclick = () => (live ? stop() : start());
@@ -973,6 +1107,7 @@
       active: () => live,
       stop: async () => { await stop(); await new Promise(r => setTimeout(r, 550)); },
       abort: () => {
+        if (fileJob) fileJob.cancel();
         live = false;
         recogGen++;
         clearInterval(timer);
