@@ -1,0 +1,20 @@
+{
+  "name": "Idea Organizer",
+  "short_name": "Ideas",
+  "description": "Capture ideas by voice, text, photo or link. Auto titles, tags and reminders.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0b110e",
+  "theme_color": "#0d1612",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" },
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ],
+  "shortcuts": [
+    { "name": "Record voice note", "short_name": "Record", "url": "./?new=voice" },
+    { "name": "Type a note", "short_name": "Type", "url": "./?new=text" }
+  ]
+}
