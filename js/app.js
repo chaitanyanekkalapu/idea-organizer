@@ -513,15 +513,17 @@
           <div class="rec-alt">
             <label class="btn ghost small">📱 Phone recorder<input type="file" id="phoneRec" accept="audio/*" capture hidden></label>
             <label class="btn ghost small">📂 Import audio<input type="file" id="importRec" accept="audio/*,.m4a,.mp3,.aac,.wav,.ogg,.opus,.amr,.3gp" hidden></label>
+            <button class="btn ghost small" id="pasteBtn" type="button">📋 Paste transcript</button>
           </div>
-          <div class="rec-hint small">Best quality: record with your phone's recorder app, then the transcript is made from the file.</div>
+          <div class="rec-hint small">Using NeoSapien? Open the memory there → <b>Share</b> → <b>Idea Organizer</b>. Or copy its transcript and tap Paste.</div>
         </div>
         <label class="field" for="body">Transcript (you can edit it)</label>
         <textarea class="input" id="body" placeholder="Your words appear here…"></textarea>
         <div class="interim small" id="interim"></div>
         <div id="recAudio"></div>`;
     } else if (type === 'text') {
-      inner = `<label class="field" for="body">Your note</label>
+      inner = `<div class="row" style="justify-content:flex-end"><button class="btn ghost small" id="pasteBtn" type="button">📋 Paste</button></div>
+        <label class="field" for="body">Your note</label>
         <textarea class="input" id="body" placeholder="Write your idea. Mention dates like 'call Ravi tomorrow at 5' to get a reminder." autofocus></textarea>`;
     } else if (type === 'photo') {
       inner = `<label class="btn ghost" style="width:100%">${ICONS.photo} Choose or take photos<input id="file" type="file" accept="image/*" multiple hidden></label>
@@ -570,6 +572,22 @@
     }
 
     if (type === 'voice') rec = setupRecorder(body, autostart);
+
+    // Paste text copied from another app (e.g. a NeoSapien transcript).
+    const pasteBtn = $('#pasteBtn', body);
+    if (pasteBtn) pasteBtn.onclick = async () => {
+      const ta = $('#body', body);
+      try {
+        const t = (await navigator.clipboard.readText()).trim();
+        if (!t) { toast('Clipboard is empty. Copy the transcript first.'); return; }
+        ta.value = [ta.value.trim(), t].filter(Boolean).join('\n\n');
+        ta.dispatchEvent(new Event('input'));
+        toast('Pasted');
+      } catch (e) {
+        ta.focus();
+        toast('Long-press the box and choose Paste', 3500);
+      }
+    };
 
     $('#save', body).onclick = async () => {
       if (rec && rec.active()) await rec.stop();
@@ -1565,6 +1583,57 @@
     }
   }
 
+  // ---------- Received shares (NeoSapien, WhatsApp, Recorder, …) ------------
+  // The service worker parks shared text/files in the "share-inbox" cache;
+  // this turns them into one memory. Shared text (e.g. a NeoSapien transcript
+  // or summary) becomes the note, so titles, tags and reminders come from it.
+  async function importShared() {
+    if (!('caches' in window)) return;
+    const cache = await caches.open('share-inbox');
+    const metaRes = await cache.match('inbox/meta');
+    if (!metaRes) return;
+    const meta = await metaRes.json();
+    const files = [];
+    for (const f of meta.files || []) {
+      const res = await cache.match(f.key);
+      if (res) files.push(new File([await res.blob()], f.name, { type: f.type || res.headers.get('Content-Type') || '' }));
+    }
+    for (const key of await cache.keys()) await cache.delete(key);
+
+    // Some apps put the link inside the text; keep it as a link too.
+    let text = [meta.title && !String(meta.text || '').startsWith(meta.title) ? meta.title : '', meta.text].filter(Boolean).join('\n\n').trim();
+    const links = [];
+    if (meta.url) links.push(meta.url);
+    for (const m of text.match(/https?:\/\/\S+/g) || []) if (!links.includes(m)) links.push(m);
+    const now = Date.now();
+    const attachments = [];
+    let duration = 0;
+    for (const f of files) {
+      const kind = f.type.startsWith('image/') ? 'image' : f.type.startsWith('audio/') || /\.(m4a|mp3|aac|wav|ogg|opus|amr|3gp)$/i.test(f.name) ? 'audio' : 'file';
+      const blob = kind === 'image' ? await shrinkImage(f) : f;
+      if (kind === 'audio') duration += await new Promise(r => { const a = new Audio(); a.preload = 'metadata'; a.onloadedmetadata = () => r(isFinite(a.duration) ? a.duration : 0); a.onerror = () => r(0); a.src = URL.createObjectURL(f); });
+      attachments.push({ kind, name: f.name, mime: f.type, size: f.size, blobId: await DB.putBlob(blob) });
+      // A shared .txt is usually a transcript: read it into the note.
+      if (kind === 'file' && /^text\/|\.(txt|md)$/i.test(f.type || f.name) && f.size < 500000) text = [text, (await f.text()).trim()].filter(Boolean).join('\n\n');
+    }
+    const s = Smart.analyze(text, new Date(now));
+    const hasAudio = attachments.some(a => a.kind === 'audio');
+    const type = hasAudio ? 'voice' : attachments.some(a => a.kind === 'image') ? 'photo' : !text && links.length ? 'link' : attachments.length && !text ? 'file' : 'text';
+    let title = s.title;
+    if (!text) title = type === 'link' ? prettyUrl(links[0]) : attachments[0] ? attachments[0].name : 'Shared memory';
+    const note = {
+      id: DB.uid(), createdAt: now, updatedAt: now, type,
+      title, summary: s.summary, body: text,
+      folder: s.tags[0] || 'Inbox', tags: [...new Set([...s.tags, 'Shared'])], reminders: s.reminders,
+      links, attachments, duration: Math.round(duration), source: 'share',
+    };
+    if (!text && !attachments.length && !links.length) { toast('Nothing was shared'); return; }
+    await saveNote(note);
+    setTab('memories');
+    toast(note.reminders.length ? `Added from share · ${plural(note.reminders.length, 'reminder')}` : 'Added from share');
+    setTimeout(() => openDetail(note.id), 120);
+  }
+
   // ---------- boot ----------------------------------------------------------
   $$('.tabbar button').forEach(b => b.onclick = () => setTab(b.dataset.tab));
   $('#fab').onclick = () => openCapture(state.tab === 'home' ? 'text' : 'voice');
@@ -1576,6 +1645,12 @@
     const shortcut = new URLSearchParams(location.search).get('new');
     setTab(['home', 'ask', 'memories', 'reminders'].includes(tab) ? tab : 'memories');
     if (shortcut) openCapture(shortcut, shortcut === 'voice');
+    const shared = new URLSearchParams(location.search).get('shared');
+    if (shared) {
+      history.replaceState(null, '', location.pathname);
+      if (shared === 'error') toast('Could not receive the shared item. Try sharing again.');
+      else importShared();
+    }
     checkDue();
     setInterval(checkDue, 30000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) { checkDue(); render(); } });

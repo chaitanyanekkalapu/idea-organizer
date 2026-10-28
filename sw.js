@@ -1,6 +1,6 @@
 // Offline cache for the app shell. Bump VERSION whenever a file changes so
 // phones pick up the new copy.
-const VERSION = 'ideas-v5';
+const VERSION = 'ideas-v6';
 const SHELL = [
   './', 'index.html', 'styles.css', 'manifest.webmanifest',
   'js/db.js', 'js/smart.js', 'js/app.js',
@@ -13,13 +13,40 @@ self.addEventListener('install', e => {
 
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys()
-    .then(keys => Promise.all(keys.filter(k => k !== VERSION).map(k => caches.delete(k))))
+    .then(keys => Promise.all(keys.filter(k => k !== VERSION && k !== 'share-inbox').map(k => caches.delete(k))))
     .then(() => self.clients.claim()));
 });
 
+// Share target: another app (NeoSapien, WhatsApp, Recorder…) shared text or
+// files to Idea Organizer. Park them in a cache and open the app, which turns
+// them into a memory.
+const INBOX = 'share-inbox';
+async function receiveShare(request) {
+  const form = await request.formData();
+  const cache = await caches.open(INBOX);
+  const files = form.getAll('files').filter(f => f && f.size);
+  const meta = {
+    at: Date.now(),
+    title: form.get('title') || '',
+    text: form.get('text') || '',
+    url: form.get('url') || '',
+    files: files.map((f, i) => ({ key: `inbox/file-${i}`, name: f.name || `shared-${i}`, type: f.type || '' })),
+  };
+  for (const [i, f] of files.entries()) {
+    await cache.put(`inbox/file-${i}`, new Response(f, { headers: { 'Content-Type': f.type || 'application/octet-stream' } }));
+  }
+  await cache.put('inbox/meta', new Response(JSON.stringify(meta), { headers: { 'Content-Type': 'application/json' } }));
+  return Response.redirect('./?shared=1', 303);
+}
+
 // Network first so updates show up straight away; cache when offline.
 self.addEventListener('fetch', e => {
-  if (e.request.method !== 'GET' || new URL(e.request.url).origin !== location.origin) return;
+  const url = new URL(e.request.url);
+  if (e.request.method === 'POST' && url.origin === location.origin && url.pathname.endsWith('/share-target')) {
+    e.respondWith(receiveShare(e.request).catch(() => Response.redirect('./?shared=error', 303)));
+    return;
+  }
+  if (e.request.method !== 'GET' || url.origin !== location.origin) return;
   e.respondWith(
     fetch(e.request)
       .then(res => {

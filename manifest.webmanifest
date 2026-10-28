@@ -16,5 +16,22 @@
   "shortcuts": [
     { "name": "Record voice note", "short_name": "Record", "url": "./?new=voice" },
     { "name": "Type a note", "short_name": "Type", "url": "./?new=text" }
-  ]
+  ],
+  "share_target": {
+    "action": "./share-target",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url",
+      "files": [
+        {
+          "name": "files",
+          "accept": ["audio/*", "image/*", "video/*", "text/*", "application/pdf",
+                     ".m4a", ".mp3", ".aac", ".wav", ".ogg", ".opus", ".amr", ".3gp", ".txt", ".md", ".pdf", ".doc", ".docx"]
+        }
+      ]
+    }
+  }
 }

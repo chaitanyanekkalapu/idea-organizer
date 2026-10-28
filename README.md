@@ -22,6 +22,11 @@ Friday morning", "book the hall on 5th Nov", "in 2 hours", or Telugu రేప�
 become dated reminders. Alerts fire while the app is open; for a guaranteed
 phone alarm tap the calendar icon to add it to Google Calendar.
 
+**From NeoSapien (or any app).** Idea Organizer is a share destination once
+installed to the home screen. In NeoSapien open a memory → Share → Idea
+Organizer: the shared transcript/summary (and audio, if sent) becomes a new
+memory with titles, tags and reminders. Or copy the text and tap 📋 Paste.
+
 **Share / export.** Tap **Share** on a memory, or the share icon on the
 Memories screen to send the whole current view (folder, tag or search):
 

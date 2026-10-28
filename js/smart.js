@@ -50,7 +50,10 @@ const Smart = (() => {
   // Speech transcripts rarely have punctuation, so long unpunctuated runs are
   // cut into ~18-word pieces to give the summary something to rank.
   function sentences(text) {
-    const parts = clean(text).split(/(?<=[.!?।])\s+|\s*\n+\s*/).filter(Boolean);
+    // Line breaks end a sentence too (titles, lists), so split on them before
+    // clean() flattens whitespace.
+    const parts = (text || '').split(/\n+/).map(clean).filter(Boolean)
+      .flatMap(line => line.split(/(?<=[.!?।])\s+/)).filter(Boolean);
     const out = [];
     for (const p of parts) {
       const w = p.split(' ');
@@ -188,14 +191,25 @@ const Smart = (() => {
     return d.getTime();
   }
 
+  // A clause is a task when it says so outright ("need to", "remind me",
+  // "చేయాలి"), opens with an action verb ("Call Ravi…"), or pairs an action
+  // with a date. "He outlined topics to discuss" is a description, not a task.
+  const STRONG = /\b(remind(?: me)?|remember to|don'?t forget|need to|have to|must|todo|to-do)\b|గుర్తు|చేయాలి|కొనాలి|పంపాలి/i;
+  function isTask(c, now) {
+    if (STRONG.test(c)) return true;
+    if (!ACTION.test(c)) return false;
+    const opening = c.split(/\s+/).slice(0, 3).join(' ');
+    return ACTION.test(opening) || parseWhen(c, now) !== null;
+  }
+
   function makeReminders(text, now = new Date()) {
     const out = [];
     const seen = new Set();
     // Split on sentence ends and on joining words so "call X and buy Y" gives two items.
-    const clauses = clean(text).split(/(?<=[.!?।])\s+|\n+|;\s*|\s+(?:and then|also|and also)\s+|,?\s+and\s+(?=(?:call|buy|send|pay|book|meet|email|order|visit|submit|collect|pick up|prepare|finish|check|ask|remind)\b)/i);
+    const clauses = (text || '').split(/\n+/).map(clean).join('\n').split(/(?<=[.!?।])\s+|\n+|;\s*|\s+(?:and then|also|and also)\s+|,?\s+and\s+(?=(?:call|buy|send|pay|book|meet|email|order|visit|submit|collect|pick up|prepare|finish|check|ask|remind)\b)/i);
     for (let c of clauses) {
       c = c.replace(FILLER, '').replace(/^(?:also|and|then|and then)\s+/i, '').trim();
-      if (c.length < 4 || !ACTION.test(c)) continue;
+      if (c.length < 4 || !isTask(c, now)) continue;
       let task = c.replace(/^(?:i\s+)?(?:please\s+)?(?:remind me to|remind me|remember to|don'?t forget to|i need to|i have to|need to|have to|i must|todo:?|to-do:?)\s*/i, '');
       task = cap(task.replace(/[.!?]+$/, ''));
       if (task.length > 140) task = task.slice(0, 137).replace(/\s\S*$/, '') + '…';
