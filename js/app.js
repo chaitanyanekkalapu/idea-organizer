@@ -616,22 +616,29 @@
   }
 
   // Speech-to-text with the browser's built-in recognizer, plus optional audio
-  // capture. Android Chrome repeats results in continuous mode, so there we
-  // run one-shot sessions and restart them until the user taps stop.
+  // capture. Each recognizer session is rebuilt from its full result list
+  // (final or not) on every event: Android Chrome often ends a session
+  // without ever marking the last words final, and repeats results in
+  // continuous mode. On Android we therefore run one-shot sessions and
+  // chain them until the user taps stop.
   function setupRecorder(body, autostart) {
     const btn = $('#rec', body);
     const ta = $('#body', body);
-    const interim = $('#interim', body);
+    const status = $('#interim', body);
     const hint = $('#recHint', body);
     const timeEl = $('#recTime', body);
     let live = false, startedAt = 0, elapsed = 0, timer = null;
     let recog = null, media = null, chunks = [], audioBlob = null, stream = null;
+    let base = '';          // transcript committed before the current session
+    let sessionText = '';   // everything heard in the current session
+    let silentRuns = 0;     // sessions in a row that heard nothing
+    let heardAny = false;
 
     $$('[data-lang]', body).forEach(b => b.onclick = async () => {
       state.settings.lang = b.dataset.lang;
       await DB.setSetting('lang', b.dataset.lang);
       $$('[data-lang]', body).forEach(x => x.classList.toggle('on', x === b));
-      if (live) { stop(); start(); }
+      if (live) { await stop(); start(); }
     });
 
     function tick() {
@@ -639,56 +646,91 @@
       timeEl.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
     }
 
-    function append(t) {
-      t = t.trim();
-      if (!t) return;
-      ta.value = (ta.value ? ta.value.replace(/\s+$/, '') + ' ' : '') + t;
-    }
+    const join = (a, b) => [a.trim(), b.trim()].filter(Boolean).join(' ');
+    const show = () => { ta.value = join(base, sessionText); ta.scrollTop = ta.scrollHeight; };
+    const commit = () => { base = join(base, sessionText); sessionText = ''; };
+    const setStatus = msg => { status.textContent = msg; };
 
     function newRecognizer() {
       const r = new SR();
       r.lang = state.settings.lang;
       r.continuous = !isAndroid;
       r.interimResults = true;
+      r.maxAlternatives = 1;
+      let gotResult = false;
+      r.onstart = () => setStatus('🎙️ Listening…');
+      r.onspeechstart = () => setStatus('🟢 Hearing you…');
       r.onresult = e => {
-        let inter = '';
-        for (let i = e.resultIndex; i < e.results.length; i++) {
-          if (e.results[i].isFinal) append(e.results[i][0].transcript);
-          else inter += e.results[i][0].transcript;
-        }
-        interim.textContent = inter;
+        gotResult = true;
+        heardAny = true;
+        silentRuns = 0;
+        let text = '';
+        for (let i = 0; i < e.results.length; i++) text += ' ' + e.results[i][0].transcript;
+        sessionText = text.replace(/\s+/g, ' ').trim();
+        show();
+        setStatus('🟢 Hearing you…');
       };
       r.onerror = e => {
-        if (e.error === 'no-speech' || e.error === 'aborted') return;
-        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') { hint.textContent = 'Microphone permission was blocked. Allow it in the browser settings.'; stop(); }
-        else if (e.error === 'network') { hint.textContent = 'Voice-to-text needs internet. You can still type.'; stop(); }
-        else hint.textContent = 'Voice error: ' + e.error;
+        if (e.error === 'aborted') return;
+        if (e.error === 'no-speech') { setStatus('…waiting for you to speak'); return; }
+        const msg = {
+          'not-allowed': 'Microphone is blocked. Tap the 🔒 next to the address (or App info → Permissions) and allow Microphone.',
+          'service-not-allowed': 'Chrome\'s voice service is off. Check that the Google app is installed and enabled, then try again.',
+          'audio-capture': 'No microphone found, or another app is using it. Close other recording apps and try again.',
+          'network': 'Voice-to-text needs internet. Check your connection, or type instead.',
+          'language-not-supported': 'This language isn\'t available for voice on this phone. Switch to English, or add the language in Google voice settings.',
+        }[e.error] || 'Voice error: ' + e.error;
+        hint.textContent = msg;
+        setStatus('');
+        stop();
       };
       r.onend = () => {
-        interim.textContent = '';
-        if (live) { try { r.start(); } catch (err) { recog = newRecognizer(); try { recog.start(); } catch (e2) {} } }
+        commit();
+        show();
+        if (!live) return;
+        if (!gotResult && ++silentRuns >= 4) {
+          setStatus(heardAny ? '…waiting for you to speak' : '⚠️ Not hearing anything. Speak closer to the phone, or check that no other app is using the mic.');
+        }
+        // A short pause before restarting avoids InvalidStateError on Android.
+        setTimeout(() => {
+          if (!live) return;
+          recog = newRecognizer();
+          try { recog.start(); } catch (err) { setStatus('Restarting…'); }
+        }, isAndroid ? 250 : 50);
       };
       return r;
     }
 
     async function start() {
       if (!SR && !state.settings.keepAudio) { toast('Voice-to-text needs Chrome. Type your note instead.'); ta.focus(); return; }
+      base = ta.value.trim();
+      sessionText = '';
+      silentRuns = 0;
       live = true;
       startedAt = Date.now();
       btn.classList.add('live');
       btn.innerHTML = ICONS.stop;
       btn.setAttribute('aria-label', 'Stop recording');
-      hint.textContent = 'Listening… tap to stop';
+      hint.textContent = 'Tap to stop';
+      setStatus('Starting mic…');
       timer = setInterval(tick, 500);
-      if (state.settings.keepAudio && window.MediaRecorder) {
+      // Android can't share the mic between the recognizer and a recorder, so
+      // audio is only kept there when voice-to-text is unavailable.
+      const recordAudio = state.settings.keepAudio && window.MediaRecorder && (!SR || !isAndroid);
+      if (recordAudio) {
         try {
           stream = await navigator.mediaDevices.getUserMedia({ audio: true });
           media = new MediaRecorder(stream);
+          chunks = [];
           media.ondataavailable = e => e.data.size && chunks.push(e.data);
           media.start();
+          if (!SR) setStatus('🎙️ Recording audio (no transcript in this browser)');
         } catch (e) { hint.textContent = 'Could not save audio; transcribing only.'; }
       }
-      if (SR) { recog = newRecognizer(); try { recog.start(); } catch (e) {} }
+      if (SR) {
+        recog = newRecognizer();
+        try { recog.start(); } catch (e) { hint.textContent = 'Could not start voice-to-text: ' + e.message; stop(); }
+      }
     }
 
     function stop() {
@@ -701,8 +743,14 @@
         btn.classList.remove('live');
         btn.innerHTML = ICONS.voice;
         btn.setAttribute('aria-label', 'Start recording');
-        hint.textContent = 'Paused. Tap to continue, or Save.';
+        if (!/blocked|off|microphone|internet|language|error|start/i.test(hint.textContent)) hint.textContent = 'Paused. Tap to continue, or Save.';
+        // stop() (not abort) lets the recognizer flush its last words; onend commits them.
         if (recog) { try { recog.stop(); } catch (e) {} }
+        setTimeout(() => {
+          commit();
+          show();
+          setStatus(ta.value ? '' : heardAny ? '' : 'No words were picked up. Try again, speaking a little louder.');
+        }, 700);
         if (media && media.state !== 'inactive') {
           media.onstop = () => {
             audioBlob = new Blob(chunks, { type: media.mimeType || 'audio/webm' });
@@ -711,17 +759,18 @@
           };
           media.stop();
         } else resolve();
-        // Give the recognizer a moment to deliver its last final result.
-        setTimeout(() => { if (interim.textContent) { append(interim.textContent); interim.textContent = ''; } }, 600);
       });
     }
+
+    // Typing while paused should survive the next recording session.
+    ta.addEventListener('input', () => { if (!live) base = ta.value; });
 
     btn.onclick = () => (live ? stop() : start());
     if (autostart && SR) setTimeout(start, 150);
 
     return {
       active: () => live,
-      stop: async () => { await stop(); await new Promise(r => setTimeout(r, 650)); },
+      stop: async () => { await stop(); await new Promise(r => setTimeout(r, 750)); },
       abort: () => { live = false; clearInterval(timer); try { recog && recog.abort(); } catch (e) {} if (stream) stream.getTracks().forEach(t => t.stop()); },
       audio: () => audioBlob,
       seconds: () => Math.round(elapsed / 1000),
