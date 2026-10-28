@@ -15,7 +15,7 @@
     filterType: '',
     remTab: 'upcoming',
     askQuery: '',
-    settings: { lang: 'en-IN', keepAudio: false },
+    settings: { lang: 'en-IN', saveAudio: true, fastMode: true },
   };
 
   // ---------- helpers -------------------------------------------------------
@@ -94,7 +94,8 @@
   async function load() {
     state.notes = await DB.allNotes();
     state.settings.lang = await DB.getSetting('lang', 'en-IN');
-    state.settings.keepAudio = await DB.getSetting('keepAudio', false);
+    state.settings.saveAudio = await DB.getSetting('saveAudio', true);
+    state.settings.fastMode = await DB.getSetting('fastMode', true);
   }
 
   function folders() {
@@ -140,6 +141,7 @@
     const rems = (n.reminders || []).filter(r => !r.done).length;
     const meta = [shortDate(n.createdAt), time(new Date(n.createdAt))];
     if (n.type === 'voice' && n.duration) meta.push(durLabel(n.duration));
+    if ((n.attachments || []).some(a => a.kind === 'audio')) meta.push('🎧');
     else if (n.type !== 'text') meta.push(n.type.charAt(0).toUpperCase() + n.type.slice(1));
     const img = (n.attachments || []).find(a => a.kind === 'image');
     return `<button class="card" data-open="${n.id}">
@@ -505,11 +507,14 @@
           </div>
           <button class="rec-btn" id="rec" aria-label="Start recording">${ICONS.voice}</button>
           <div class="rec-time" id="recTime">0:00</div>
+          <div class="meter" id="meter" aria-hidden="true">${'<i></i>'.repeat(28)}</div>
           <div class="rec-hint" id="recHint">${SR ? 'Tap to start. Speak naturally, then tap again to stop.' : 'Voice-to-text is not supported in this browser. Use Chrome, or type below.'}</div>
+          <div class="rec-mode small muted" id="recMode">${state.settings.saveAudio ? '🎧 Saves the recording + transcript' : 'Transcript only (recording off in ⋯ Settings)'}</div>
         </div>
         <label class="field" for="body">Transcript (you can edit it)</label>
         <textarea class="input" id="body" placeholder="Your words appear here…"></textarea>
-        <div class="interim small" id="interim"></div>`;
+        <div class="interim small" id="interim"></div>
+        <div id="recAudio"></div>`;
     } else if (type === 'text') {
       inner = `<label class="field" for="body">Your note</label>
         <textarea class="input" id="body" placeholder="Write your idea. Mention dates like 'call Ravi tomorrow at 5' to get a reminder." autofocus></textarea>`;
@@ -565,8 +570,8 @@
       if (rec && rec.active()) await rec.stop();
       const text = $('#body', body).value.trim();
       const url = $('#url', body) ? $('#url', body).value.trim() : '';
-      const audio = rec ? rec.audio() : null;
-      if (!text && !files.length && !url && !audio) { toast('Nothing to save yet'); return; }
+      const clips = rec ? rec.audio() : [];
+      if (!text && !files.length && !url && !clips.length) { toast('Nothing to save yet'); return; }
       if (url && !/^https?:\/\//i.test(url)) { toast('Links should start with https://'); return; }
 
       const now = Date.now();
@@ -575,7 +580,12 @@
       for (const f of files) {
         attachments.push({ kind: type === 'photo' ? 'image' : 'file', name: f.name || 'photo.jpg', mime: f.type, size: f.size, blobId: await DB.putBlob(f) });
       }
-      if (audio) attachments.push({ kind: 'audio', name: 'recording.webm', mime: audio.type, size: audio.size, blobId: await DB.putBlob(audio) });
+      for (const [i, audio] of clips.entries()) {
+        const ext = /mp4|m4a|aac/.test(audio.type) ? 'm4a' : /ogg/.test(audio.type) ? 'ogg' : 'webm';
+        const d = new Date(now);
+        const name = `voice-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}-${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}${clips.length > 1 ? '-' + (i + 1) : ''}.${ext}`;
+        attachments.push({ kind: 'audio', name, mime: audio.type, size: audio.size, blobId: await DB.putBlob(audio) });
+      }
 
       let title = smart.title;
       if (!text) {
@@ -626,30 +636,82 @@
     });
   }
 
-  // Speech-to-text with the browser's built-in recognizer, plus optional audio
-  // capture. Each recognizer session is rebuilt from its full result list
-  // (final or not) on every event: Android Chrome often ends a session
-  // without ever marking the last words final, and repeats results in
-  // continuous mode. On Android we therefore run one-shot sessions and
-  // chain them until the user taps stop.
+  // Voice capture: records the audio and transcribes it live.
+  //
+  // Speed: the recognizer runs in continuous mode with interim results, and a
+  // replacement starts the moment one ends, so text shows up as you speak.
+  // Where Chrome offers on-device recognition (processLocally) it is used,
+  // which skips the network round trip.
+  //
+  // Recording + transcript: the mic is opened once with getUserMedia; the same
+  // track feeds MediaRecorder and, via start(track), the recognizer. Phones
+  // whose Chrome can't share the mic that way fall back to transcript-only and
+  // remember it (localStorage 'srTrack' = 'bad').
+  //
+  // Every event rebuilds the session text from all results, final or not:
+  // Android often never marks the last words final, and in continuous mode it
+  // can repeat earlier text, which sessionText() collapses.
+  const localVoice = {};  // lang -> 'available' | 'downloadable' | 'unavailable'
+
+  async function checkLocalVoice(lang) {
+    if (!SR || typeof SR.available !== 'function') return 'unavailable';
+    if (localVoice[lang]) return localVoice[lang];
+    try { localVoice[lang] = await SR.available({ langs: [lang], processLocally: true }); }
+    catch (e) { localVoice[lang] = 'unavailable'; }
+    return localVoice[lang];
+  }
+
+  function sessionText(results) {
+    const parts = [];
+    for (let i = 0; i < results.length; i++) {
+      const t = (results[i][0] && results[i][0].transcript || '').trim();
+      if (!t) continue;
+      const last = parts[parts.length - 1];
+      const tl = t.toLowerCase(), ll = last && last.toLowerCase();
+      if (last && tl.startsWith(ll)) parts[parts.length - 1] = t;  // grew: replace
+      else if (last && ll.startsWith(tl)) continue;                 // repeat of a prefix
+      else parts.push(t);
+    }
+    return parts.join(' ');
+  }
+
+  function pickAudioType() {
+    for (const t of ['audio/mp4;codecs=mp4a.40.2', 'audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus']) {
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) return t;
+    }
+    return '';
+  }
+
+  const srTrackState = () => { try { return localStorage.getItem('srTrack') || ''; } catch (e) { return ''; } };
+  const setSrTrackState = v => { try { localStorage.setItem('srTrack', v); } catch (e) {} };
+
   function setupRecorder(body, autostart) {
     const btn = $('#rec', body);
     const ta = $('#body', body);
     const status = $('#interim', body);
     const hint = $('#recHint', body);
+    const modeEl = $('#recMode', body);
     const timeEl = $('#recTime', body);
+    const bars = $$('#meter i', body);
+    const audioBox = $('#recAudio', body);
+
     let live = false, startedAt = 0, elapsed = 0, timer = null;
-    let recog = null, media = null, chunks = [], audioBlob = null, stream = null;
-    let base = '';          // transcript committed before the current session
-    let sessionText = '';   // everything heard in the current session
-    let silentRuns = 0;     // sessions in a row that heard nothing
-    let heardAny = false;
+    let recog = null, recogGen = 0, useTrack = false, useLocal = false;
+    let stream = null, recorder = null, chunks = [], clips = [], audioType = '';
+    let actx = null, analyser = null, raf = 0, peak = 0, meterLive = false;
+    let base = '', current = '', heardAny = false, lastResultAt = 0;
+
+    const join = (a, b) => [a.trim(), b.trim()].filter(Boolean).join(' ');
+    const show = () => { ta.value = join(base, current); ta.scrollTop = ta.scrollHeight; };
+    const commit = () => { base = join(base, current); current = ''; };
+    const setStatus = msg => { status.textContent = msg; };
 
     $$('[data-lang]', body).forEach(b => b.onclick = async () => {
       state.settings.lang = b.dataset.lang;
       await DB.setSetting('lang', b.dataset.lang);
       $$('[data-lang]', body).forEach(x => x.classList.toggle('on', x === b));
-      if (live) { await stop(); start(); }
+      // Switch the recognizer's language without stopping the recording.
+      if (live && SR) { useLocal = await wantLocal(); restartRecognizer(); }
     });
 
     function tick() {
@@ -657,66 +719,155 @@
       timeEl.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
     }
 
-    const join = (a, b) => [a.trim(), b.trim()].filter(Boolean).join(' ');
-    const show = () => { ta.value = join(base, sessionText); ta.scrollTop = ta.scrollHeight; };
-    const commit = () => { base = join(base, sessionText); sessionText = ''; };
-    const setStatus = msg => { status.textContent = msg; };
+    // Live level meter so you can see the mic is picking you up.
+    function startMeter() {
+      if (!stream || !window.AudioContext) return;
+      try {
+        actx = new AudioContext();
+        if (actx.state === 'suspended') actx.resume().catch(() => {});
+        analyser = actx.createAnalyser();
+        analyser.fftSize = 512;
+        actx.createMediaStreamSource(stream).connect(analyser);
+      } catch (e) { return; }
+      const data = new Uint8Array(analyser.fftSize);
+      const levels = new Array(bars.length).fill(0);
+      let last = 0;
+      const loop = t => {
+        raf = requestAnimationFrame(loop);
+        if (t - last < 60) return;
+        last = t;
+        analyser.getByteTimeDomainData(data);
+        let sum = 0;
+        for (const v of data) sum += ((v - 128) / 128) ** 2;
+        const rms = Math.sqrt(sum / data.length);
+        if (actx && actx.state === 'running') { meterLive = true; peak = Math.max(peak, rms); }
+        levels.shift();
+        levels.push(Math.min(1, rms * 6));
+        bars.forEach((b, i) => { b.style.transform = `scaleY(${Math.max(0.08, levels[i])})`; });
+      };
+      raf = requestAnimationFrame(loop);
+    }
+
+    function stopMeter() {
+      cancelAnimationFrame(raf);
+      bars.forEach(b => { b.style.transform = ''; });
+      if (actx) { actx.close().catch(() => {}); actx = null; }
+    }
+
+    async function wantLocal() {
+      if (!state.settings.fastMode) return false;
+      return (await checkLocalVoice(state.settings.lang)) === 'available';
+    }
 
     function newRecognizer() {
+      const gen = ++recogGen;
       const r = new SR();
       r.lang = state.settings.lang;
-      r.continuous = !isAndroid;
+      r.continuous = true;
       r.interimResults = true;
       r.maxAlternatives = 1;
-      let gotResult = false;
-      r.onstart = () => setStatus('🎙️ Listening…');
-      r.onspeechstart = () => setStatus('🟢 Hearing you…');
+      if (useLocal) { try { r.processLocally = true; } catch (e) {} }
+      r.onstart = () => { if (gen === recogGen && !heardAny) setStatus('🎙️ Listening…'); };
       r.onresult = e => {
-        gotResult = true;
+        if (gen !== recogGen) return;
         heardAny = true;
-        silentRuns = 0;
-        let text = '';
-        for (let i = 0; i < e.results.length; i++) text += ' ' + e.results[i][0].transcript;
-        sessionText = text.replace(/\s+/g, ' ').trim();
+        lastResultAt = Date.now();
+        current = sessionText(e.results);
         show();
         setStatus('🟢 Hearing you…');
       };
       r.onerror = e => {
-        if (e.error === 'aborted') return;
-        if (e.error === 'no-speech') { setStatus('…waiting for you to speak'); return; }
+        if (gen !== recogGen || e.error === 'aborted' || e.error === 'no-speech') return;
+        if (useTrack && (e.error === 'audio-capture' || e.error === 'not-allowed' || e.error === 'bad-grammar' || e.error === 'invalid-state')) {
+          // This Chrome can't transcribe from our shared track: transcript wins.
+          setSrTrackState('bad');
+          fallbackToTranscriptOnly();
+          return;
+        }
+        if (useLocal && (e.error === 'language-not-supported' || e.error === 'service-not-allowed')) {
+          localVoice[state.settings.lang] = 'unavailable';
+          useLocal = false;
+          restartRecognizer();
+          return;
+        }
         const msg = {
           'not-allowed': 'Microphone is blocked. Tap the 🔒 next to the address (or App info → Permissions) and allow Microphone.',
           'service-not-allowed': 'Chrome\'s voice service is off. Check that the Google app is installed and enabled, then try again.',
           'audio-capture': 'No microphone found, or another app is using it. Close other recording apps and try again.',
-          'network': 'Voice-to-text needs internet. Check your connection, or type instead.',
+          'network': 'Voice-to-text needs internet for this language. Check your connection, or type instead.',
           'language-not-supported': 'This language isn\'t available for voice on this phone. Switch to English, or add the language in Google voice settings.',
         }[e.error] || 'Voice error: ' + e.error;
         hint.textContent = msg;
-        setStatus('');
-        stop();
+        setStatus(recorder ? '🎧 Still recording audio' : '');
+        if (!recorder) stop();
       };
       r.onend = () => {
+        if (gen !== recogGen) return;
         commit();
         show();
-        if (!live) return;
-        if (!gotResult && ++silentRuns >= 4) {
-          setStatus(heardAny ? '…waiting for you to speak' : '⚠️ Not hearing anything. Speak closer to the phone, or check that no other app is using the mic.');
-        }
-        // A short pause before restarting avoids InvalidStateError on Android.
-        setTimeout(() => {
-          if (!live) return;
-          recog = newRecognizer();
-          try { recog.start(); } catch (err) { setStatus('Restarting…'); }
-        }, isAndroid ? 250 : 50);
+        if (live) startRecognizer();  // restart at once, no gap
       };
       return r;
     }
 
+    function startRecognizer() {
+      recog = newRecognizer();
+      const track = useTrack && stream && stream.getAudioTracks()[0];
+      try {
+        if (track && track.readyState === 'live') recog.start(track); else recog.start();
+      } catch (e) {
+        if (track) {
+          // start(track) isn't supported here.
+          setSrTrackState('bad');
+          fallbackToTranscriptOnly();
+        } else {
+          setTimeout(() => { if (live) startRecognizer(); }, 150);
+        }
+      }
+    }
+
+    function restartRecognizer() {
+      if (recog) { recogGen++; try { recog.abort(); } catch (e) {} }
+      commit();
+      startRecognizer();
+    }
+
+    // Keep whatever audio was captured so far, release the mic, and continue
+    // with the recognizer using its own mic access.
+    function fallbackToTranscriptOnly() {
+      useTrack = false;
+      stopRecorder().then(() => {
+        modeEl.textContent = 'Transcript only: this phone can\'t record audio and transcribe at the same time.';
+        if (live) restartRecognizer();
+      });
+    }
+
+    function stopRecorder() {
+      return new Promise(resolve => {
+        stopMeter();
+        const done = () => {
+          if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+          resolve();
+        };
+        if (recorder && recorder.state !== 'inactive') {
+          recorder.onstop = () => {
+            if (chunks.length) clips.push(new Blob(chunks, { type: (recorder.mimeType || audioType || 'audio/webm').split(';')[0] }));
+            chunks = [];
+            recorder = null;
+            done();
+          };
+          try { recorder.requestData(); } catch (e) {}
+          recorder.stop();
+        } else { recorder = null; done(); }
+      });
+    }
+
     async function start() {
-      if (!SR && !state.settings.keepAudio) { toast('Voice-to-text needs Chrome. Type your note instead.'); ta.focus(); return; }
+      if (!SR && !state.settings.saveAudio) { toast('Voice-to-text needs Chrome. Type your note instead.'); ta.focus(); return; }
       base = ta.value.trim();
-      sessionText = '';
-      silentRuns = 0;
+      current = '';
+      peak = 0;
+      meterLive = false;
       live = true;
       startedAt = Date.now();
       btn.classList.add('live');
@@ -724,23 +875,60 @@
       btn.setAttribute('aria-label', 'Stop recording');
       hint.textContent = 'Tap to stop';
       setStatus('Starting mic…');
-      timer = setInterval(tick, 500);
-      // Android can't share the mic between the recognizer and a recorder, so
-      // audio is only kept there when voice-to-text is unavailable.
-      const recordAudio = state.settings.keepAudio && window.MediaRecorder && (!SR || !isAndroid);
-      if (recordAudio) {
+      timer = setInterval(tick, 250);
+
+      const wantAudio = state.settings.saveAudio && window.MediaRecorder;
+      // Without recording, Android gets the mic to itself (most reliable);
+      // elsewhere we still open it for the level meter.
+      const wantStream = wantAudio || !isAndroid;
+      const [, local] = await Promise.all([
+        (async () => {
+          if (!wantStream) return;
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+          } catch (e) {
+            if (e.name === 'NotAllowedError') { hint.textContent = 'Microphone is blocked. Tap the 🔒 next to the address (or App info → Permissions) and allow Microphone.'; }
+            stream = null;
+          }
+        })(),
+        SR ? wantLocal() : Promise.resolve(false),
+      ]);
+      if (!live) { if (stream) stream.getTracks().forEach(t => t.stop()); stream = null; return; }
+      useLocal = local;
+
+      if (wantAudio && stream) {
+        audioType = pickAudioType();
         try {
-          stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          media = new MediaRecorder(stream);
+          recorder = audioType ? new MediaRecorder(stream, { mimeType: audioType, audioBitsPerSecond: 64000 }) : new MediaRecorder(stream);
           chunks = [];
-          media.ondataavailable = e => e.data.size && chunks.push(e.data);
-          media.start();
-          if (!SR) setStatus('🎙️ Recording audio (no transcript in this browser)');
-        } catch (e) { hint.textContent = 'Could not save audio; transcribing only.'; }
+          recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+          recorder.start(1000);
+        } catch (e) { recorder = null; }
       }
+      startMeter();
+
       if (SR) {
-        recog = newRecognizer();
-        try { recog.start(); } catch (e) { hint.textContent = 'Could not start voice-to-text: ' + e.message; stop(); }
+        // Share the recording's track with the recognizer unless this phone
+        // already showed it can't; on Android without a track the recognizer
+        // would fight the recorder for the mic.
+        useTrack = !!(stream && srTrackState() !== 'bad');
+        if (recorder && !useTrack && isAndroid) {
+          // Known not to work together here: keep the transcript.
+          await stopRecorder();
+          modeEl.textContent = 'Transcript only: this phone can\'t record audio and transcribe at the same time.';
+        }
+        startRecognizer();
+        modeEl.textContent = (recorder ? '🎧 Recording + transcript' : 'Transcript only') + (useLocal ? ' · ⚡ fast offline voice' : '');
+        // If the shared track gives no words after clear speech, fall back.
+        if (useTrack && srTrackState() !== 'ok') {
+          setTimeout(() => {
+            if (!live || !useTrack) return;
+            if (heardAny) setSrTrackState('ok');
+            else if (meterLive && peak > 0.05) { setSrTrackState('bad'); fallbackToTranscriptOnly(); setStatus('Switching to transcript-only mode…'); }
+          }, 6000);
+        }
+      } else {
+        setStatus(recorder ? '🎧 Recording audio (no transcript in this browser)' : '');
       }
     }
 
@@ -755,35 +943,45 @@
         btn.innerHTML = ICONS.voice;
         btn.setAttribute('aria-label', 'Start recording');
         if (!/blocked|off|microphone|internet|language|error|start/i.test(hint.textContent)) hint.textContent = 'Paused. Tap to continue, or Save.';
-        // stop() (not abort) lets the recognizer flush its last words; onend commits them.
+        // stop() (not abort) lets the recognizer flush its last words.
         if (recog) { try { recog.stop(); } catch (e) {} }
         setTimeout(() => {
+          recogGen++;
           commit();
           show();
-          setStatus(ta.value ? '' : heardAny ? '' : 'No words were picked up. Try again, speaking a little louder.');
-        }, 700);
-        if (media && media.state !== 'inactive') {
-          media.onstop = () => {
-            audioBlob = new Blob(chunks, { type: media.mimeType || 'audio/webm' });
-            stream.getTracks().forEach(t => t.stop());
-            resolve();
-          };
-          media.stop();
-        } else resolve();
+          setStatus(ta.value || heardAny ? '' : 'No words were picked up. Try again, speaking a little louder.');
+        }, 500);
+        stopRecorder().then(() => {
+          // A silent clip means this phone gave the recorder no sound while
+          // the recognizer had the mic: drop it and go transcript-only next time.
+          if (clips.length && meterLive && peak < 0.004 && heardAny) {
+            clips.pop();
+            setSrTrackState('bad');
+            modeEl.textContent = 'Transcript only: this phone can\'t record audio and transcribe at the same time.';
+          }
+          audioBox.innerHTML = clips.map(c => `<div class="attach"><audio controls src="${URL.createObjectURL(c)}"></audio></div>`).join('');
+          resolve();
+        });
       });
     }
 
-    // Typing while paused should survive the next recording session.
-    ta.addEventListener('input', () => { if (!live) base = ta.value; });
-
     btn.onclick = () => (live ? stop() : start());
-    if (autostart && SR) setTimeout(start, 150);
+    ta.addEventListener('input', () => { if (!live) base = ta.value; });
+    if (autostart) setTimeout(start, 120);
 
     return {
       active: () => live,
-      stop: async () => { await stop(); await new Promise(r => setTimeout(r, 750)); },
-      abort: () => { live = false; clearInterval(timer); try { recog && recog.abort(); } catch (e) {} if (stream) stream.getTracks().forEach(t => t.stop()); },
-      audio: () => audioBlob,
+      stop: async () => { await stop(); await new Promise(r => setTimeout(r, 550)); },
+      abort: () => {
+        live = false;
+        recogGen++;
+        clearInterval(timer);
+        stopMeter();
+        try { recog && recog.abort(); } catch (e) {}
+        if (recorder && recorder.state !== 'inactive') try { recorder.stop(); } catch (e) {}
+        if (stream) stream.getTracks().forEach(t => t.stop());
+      },
+      audio: () => clips.slice(),
       seconds: () => Math.round(elapsed / 1000),
     };
   }
@@ -808,7 +1006,8 @@
       ${n.body ? `<div class="detail-block"><h4>${n.type === 'voice' ? 'Transcript' : 'Note'}</h4><p>${esc(n.body)}</p></div>` : ''}
       ${(n.links || []).length ? `<div class="detail-block links"><h4>Links</h4>${n.links.map(l => `<p><a href="${esc(l)}" target="_blank" rel="noopener">${esc(l)}</a></p>`).join('')}</div>` : ''}
       ${others.map(a => a.kind === 'audio'
-        ? `<div class="attach"><audio controls data-blob="${a.blobId}"></audio></div>`
+        ? `<div class="detail-block"><h4>Recording</h4><audio controls preload="metadata" data-blob="${a.blobId}" style="width:100%"></audio>
+            <a class="small" style="color:var(--accent)" data-blob="${a.blobId}" download="${esc(a.name)}">Download ${esc(a.name)}</a></div>`
         : `<div class="attach">${ICONS.file}<a data-blob="${a.blobId}" download="${esc(a.name)}">${esc(a.name)}</a></div>`).join('')}
       <div class="row end"><button class="btn danger" id="del">Delete</button><div class="grow"></div>
         <button class="btn ghost" id="share">Share</button><button class="btn" id="edit">Edit</button></div>
@@ -914,7 +1113,10 @@
         <button id="exp">${ICONS.file} Export / share all<span class="count">${state.notes.length} notes</span></button>
         <button id="imp">${ICONS.file} Import backup<input type="file" id="impFile" accept="application/json,.json" hidden></button>
         <button id="ntf">${ICONS.bell} Reminder alerts<span class="count">${perm === 'granted' ? 'On' : perm === 'denied' ? 'Blocked' : perm === 'unsupported' ? 'Not supported' : 'Off'}</span></button>
-        <button id="aud">${ICONS.voice} Keep audio of voice notes<span class="count">${state.settings.keepAudio ? 'On' : 'Off'}</span></button>
+        <button id="aud">${ICONS.voice} Save voice recordings<span class="count">${state.settings.saveAudio ? 'On' : 'Off'}</span></button>
+        ${srTrackState() === 'bad' ? `<button id="retryBoth">${ICONS.voice} Retry recording + transcript together<span class="count">Off on this phone</span></button>` : ''}
+        <button id="fast">⚡ Fast voice (offline when available)<span class="count">${state.settings.fastMode ? 'On' : 'Off'}</span></button>
+        <div id="packs"></div>
       </div>
       <hr class="sep">
       <p class="small muted"><b>AI upgrade:</b> not connected. Titles, summaries, tags and reminders come from the on-device rules engine.
@@ -933,11 +1135,39 @@
         openMoreMenu();
       };
       $('#aud', body).onclick = async () => {
-        state.settings.keepAudio = !state.settings.keepAudio;
-        await DB.setSetting('keepAudio', state.settings.keepAudio);
-        if (state.settings.keepAudio && isAndroid) toast('Some Android phones cannot record audio and transcribe at once. Turn this off if transcripts stop working.', 5000);
+        state.settings.saveAudio = !state.settings.saveAudio;
+        await DB.setSetting('saveAudio', state.settings.saveAudio);
         openMoreMenu();
       };
+      const rb = $('#retryBoth', body);
+      if (rb) rb.onclick = () => { setSrTrackState(''); toast('Will try recording + transcript together next time'); openMoreMenu(); };
+      $('#fast', body).onclick = async () => {
+        state.settings.fastMode = !state.settings.fastMode;
+        await DB.setSetting('fastMode', state.settings.fastMode);
+        openMoreMenu();
+      };
+      // Offline voice packs: only shown when this Chrome supports them.
+      (async () => {
+        if (!state.settings.fastMode || !SR || typeof SR.available !== 'function') return;
+        const rows = [];
+        for (const [lang, label] of [['en-IN', 'English'], ['te-IN', 'తెలుగు']]) {
+          const st = await checkLocalVoice(lang);
+          if (st === 'downloadable' || st === 'downloading') rows.push(`<button data-pack="${lang}">⬇️ Download offline voice: ${label}<span class="count">${st === 'downloading' ? 'Downloading…' : 'Faster'}</span></button>`);
+          else if (st === 'available') rows.push(`<button disabled>✅ Offline voice ready: ${label}<span class="count">Fast</span></button>`);
+        }
+        const box = $('#packs', body);
+        if (!box) return;
+        box.innerHTML = rows.join('');
+        $$('[data-pack]', box).forEach(b => b.onclick = async () => {
+          b.querySelector('.count').textContent = 'Downloading…';
+          try {
+            const ok = await SR.install({ langs: [b.dataset.pack], processLocally: true });
+            delete localVoice[b.dataset.pack];
+            toast(ok ? 'Offline voice ready' : 'This voice pack is not available on this phone');
+          } catch (e) { toast('Could not download the voice pack'); }
+          openMoreMenu();
+        });
+      })();
       $('#wipe', body).onclick = async () => {
         if (!confirm('Delete ALL memories and files on this device?')) return;
         if (!confirm('Really delete everything? Export a backup first if unsure.')) return;
@@ -977,7 +1207,7 @@
     if ((n.reminders || []).length) out.push('', 'Reminders:', ...n.reminders.map(r => '• ' + remLine(r)));
     if (n.body && n.body !== n.summary) out.push('', n.type === 'voice' ? 'Transcript:' : 'Note:', n.body);
     if ((n.links || []).length) out.push('', 'Links:', ...n.links);
-    const files = (n.attachments || []).filter(a => a.kind !== 'audio');
+    const files = n.attachments || [];
     if (files.length) out.push('', 'Attachments: ' + files.map(a => a.name).join(', '));
     return out.join('\n');
   }
@@ -1059,7 +1289,6 @@
   async function attachmentFiles(notes) {
     const files = [];
     for (const n of notes) for (const a of n.attachments || []) {
-      if (a.kind === 'audio') continue;
       const b = await DB.getBlob(a.blobId);
       if (b) files.push(new File([b], a.name || 'photo.jpg', { type: a.mime || b.type }));
     }
