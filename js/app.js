@@ -256,6 +256,8 @@ if (typeof Drive === 'undefined') window.Drive = { configured: false, hasToken: 
   function setTab(tab) {
     state.tab = tab;
     $$('.tabbar button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
+    // Home has its own shortcuts and Record tile, so the + button would only overlap them.
+    $('#fab').hidden = tab === 'home';
     try { localStorage.setItem('tab', tab); } catch (e) {}
     render();
     window.scrollTo(0, 0);
@@ -298,38 +300,90 @@ if (typeof Drive === 'undefined') window.Drive = { configured: false, hasToken: 
   }
 
   // ---------- Home ----------------------------------------------------------
+  // Home: soft-UI dashboard. Script greeting, date pill, a column of black
+  // round shortcuts, a black clock dial, and two widget tiles.
+  function homeClock() {
+    const d = new Date();
+    const h12 = d.getHours() % 12 || 12;
+    return {
+      day: DAY[d.getDay()],
+      hh: String(h12).padStart(2, '0'),
+      mm: String(d.getMinutes()).padStart(2, '0'),
+      ap: d.getHours() < 12 ? 'AM' : 'PM',
+      date: `${String(d.getDate()).padStart(2, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${d.getFullYear()}`,
+    };
+  }
+
+  function tickHomeClock() {
+    const dial = $('#dial');
+    if (!dial) return;
+    const c = homeClock();
+    $('[data-c=hh]', dial).textContent = c.hh;
+    $('[data-c=mm]', dial).firstChild.textContent = c.mm + ' ';
+    $('[data-c=ap]', dial).textContent = c.ap;
+    $('[data-c=day]', dial).textContent = c.day;
+    $('[data-c=date]', dial).textContent = c.date;
+  }
+  setInterval(tickHomeClock, 15000);
+
   function renderHome() {
     const h = new Date().getHours();
     const greet = h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
     const rems = allReminders().filter(r => !r.done);
     const weekAgo = Date.now() - 7 * DAY_MS;
     const due = rems.filter(r => r.due).sort((a, b) => a.due - b.due).slice(0, 3);
+    const c = homeClock();
+    const shortcuts = [['text', 'Type', ICONS.text], ['photo', 'Photo', ICONS.photo], ['link', 'Link', ICONS.link], ['file', 'File', ICONS.file]];
     view.innerHTML = `
-      <div class="top"><h1>${greet}</h1><div class="grow"></div>
-        <button class="round-btn" id="more" aria-label="More">${ICONS.dots}</button></div>
-      <div class="stats">
-        <div class="stat"><b>${state.notes.length}</b><span>Memories</span></div>
-        <div class="stat"><b>${rems.length}</b><span>Open reminders</span></div>
-        <div class="stat"><b>${state.notes.filter(n => n.createdAt > weekAgo).length}</b><span>This week</span></div>
+      <div class="home-head">
+        <div class="hello">
+          <div class="script">Hello!</div>
+          <h1 class="brand">Ideas</h1>
+          <div class="script sub">Idea Organizer ✎</div>
+          <p class="greet">${greet}!<br>Have a nice day!</p>
+        </div>
+        <div class="head-right">
+          <div class="date-pill">${ICONS.cal}<span>${c.day}</span><i></i><span>${c.date}</span></div>
+          <button class="round-btn" id="more" aria-label="Settings">${ICONS.dots}</button>
+        </div>
+      </div>
+      <div class="home-grid">
+        <div class="side-nav">
+          ${shortcuts.map(([cap, label, ic]) => `<button data-cap="${cap}"><span class="ink-btn">${ic}</span><small>${label}</small></button>`).join('')}
+        </div>
+        <div class="dial-wrap">
+          <div class="dial-ring"></div>
+          <div class="dial" id="dial">
+            <div class="script day" data-c="day">${c.day}</div>
+            <div class="hh" data-c="hh">${c.hh}</div>
+            <div class="mm" data-c="mm">${c.mm} <small data-c="ap">${c.ap}</small></div>
+            <div class="dial-date" data-c="date">${c.date}</div>
+            <div class="dial-foot">✦ ${state.notes.length} ${state.notes.length === 1 ? 'memory' : 'memories'}</div>
+          </div>
+        </div>
+      </div>
+      <div class="widgets">
+        <button class="tile stat-tile" data-go="reminders">
+          <span class="tile-ic">🔔</span>
+          <b>${rems.length}</b>
+          <span>Open reminders</span>
+          <small>${state.notes.filter(n => n.createdAt > weekAgo).length} ideas this week</small>
+        </button>
+        <button class="tile rec-tile" id="bigmic" aria-label="Record a voice memory">
+          <span class="rec-thumb">${ICONS.voice}</span>
+          <span class="rec-text"><b>Record idea</b><small>Voice note</small></span>
+          <span class="ink-btn sm">${ICONS.voice}</span>
+        </button>
       </div>
       ${Drive.configured && state.drive.connected ? (state.drive.pending || !Drive.hasToken()
         ? `<button class="sync-chip warn" id="syncChip">☁️ Tap to sync with Google Drive<span>last ${esc(agoLabel(state.drive.lastSync))}</span></button>`
         : `<div class="sync-chip">☁️ Backed up to Google Drive<span>${esc(agoLabel(state.drive.lastSync))}</span></div>`)
         : Drive.configured ? `<button class="sync-chip warn" id="syncSetup">☁️ Back up to Google Drive<span>Set up</span></button>` : ''}
-      <div class="hero">
-        <button class="mic-big" id="bigmic" aria-label="Record a voice memory">${ICONS.voice}</button>
-        <p>Tap to capture an idea by voice</p>
-      </div>
-      <div class="quick">
-        <button data-cap="text">${ICONS.text}Type</button>
-        <button data-cap="photo">${ICONS.photo}Photo</button>
-        <button data-cap="link">${ICONS.link}Link</button>
-        <button data-cap="file">${ICONS.file}File</button>
-      </div>
       ${due.length ? `<div class="section-title">Coming up <button data-go="reminders">All reminders</button></div>
         ${due.map(remHTML).join('')}` : ''}
       <div class="section-title">Recent <button data-go="memories">See all</button></div>
       ${state.notes.length ? state.notes.slice(0, 3).map(cardHTML).join('') : emptyHTML('Your memories will show up here.')}
+      <div class="signature script">Designed with creativity ♡</div>
     `;
     $('#bigmic').onclick = () => openCapture('voice', true);
     const chip = $('#syncChip');

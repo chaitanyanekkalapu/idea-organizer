@@ -1,6 +1,6 @@
 // Offline cache for the app shell. Bump VERSION whenever a file changes so
 // phones pick up the new copy.
-const VERSION = 'ideas-v10';
+const VERSION = 'ideas-v12';
 const SHELL = [
   './', 'index.html', 'styles.css', 'manifest.webmanifest',
   'js/config.js', 'js/db.js', 'js/drive.js', 'js/smart.js', 'js/app.js',
@@ -13,7 +13,7 @@ self.addEventListener('install', e => {
 
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys()
-    .then(keys => Promise.all(keys.filter(k => k !== VERSION && k !== 'share-inbox').map(k => caches.delete(k))))
+    .then(keys => Promise.all(keys.filter(k => k !== VERSION && k !== 'share-inbox' && k !== 'fonts').map(k => caches.delete(k))))
     .then(() => self.clients.claim()));
 });
 
@@ -44,6 +44,14 @@ self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (e.request.method === 'POST' && url.origin === location.origin && url.pathname.endsWith('/share-target')) {
     e.respondWith(receiveShare(e.request).catch(() => Response.redirect('./?shared=error', 303)));
+    return;
+  }
+  // Google Fonts never change at a given URL: cache first so they work offline.
+  if (e.request.method === 'GET' && /^fonts\.(googleapis|gstatic)\.com$/.test(url.hostname)) {
+    e.respondWith(caches.open('fonts').then(c => c.match(e.request).then(hit => hit || fetch(e.request).then(res => {
+      if (res.ok || res.type === 'opaque') c.put(e.request, res.clone());
+      return res;
+    }))));
     return;
   }
   if (e.request.method !== 'GET' || url.origin !== location.origin) return;
