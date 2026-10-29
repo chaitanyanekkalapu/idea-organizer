@@ -49,6 +49,7 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
 
 .script { font-family: var(--script); color: #23436f; font-weight: 600; }
 .muted { color: var(--muted); }
+.faint { color: var(--faint); font-weight: 400; }
 .small { font-size: 13px; }
 
 /* Black round icon button, the signature element of the skin */

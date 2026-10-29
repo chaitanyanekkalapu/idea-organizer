@@ -757,6 +757,8 @@ if (typeof Drive === 'undefined') window.Drive = { configured: false, hasToken: 
     openSheet(`
       <div class="sheet-head"><h2>New memory</h2><button class="icon-btn" data-close aria-label="Close">${ICONS.close}</button></div>
       <div class="capture-types">${types.map(([t, l]) => `<button data-type="${t}" class="${t === type ? 'on' : ''}">${ICONS[t]}${l}</button>`).join('')}</div>
+      <label class="field" for="capTitle">Title <span class="faint">(optional, made automatically if blank)</span></label>
+      <input class="input" id="capTitle" maxlength="140" placeholder="Auto title" autocomplete="off" enterkeyhint="next">
       ${inner}
       <label class="field" for="folder">Folder (leave blank to auto-file)</label>
       <input class="input" id="folder" list="folderList" placeholder="Auto">
@@ -784,6 +786,13 @@ if (typeof Drive === 'undefined') window.Drive = { configured: false, hasToken: 
     }
 
     if (type === 'voice') rec = setupRecorder(body, autostart);
+
+    // While the title is blank, its placeholder previews the automatic title.
+    const capTitle = $('#capTitle', body);
+    const noteBox = $('#body', body);
+    if (noteBox) noteBox.addEventListener('input', () => {
+      capTitle.placeholder = Smart.analyze(noteBox.value).title || 'Auto title';
+    });
 
     // Paste text copied from another app (e.g. a NeoSapien transcript).
     const pasteBtn = $('#pasteBtn', body);
@@ -829,6 +838,8 @@ if (typeof Drive === 'undefined') window.Drive = { configured: false, hasToken: 
         else if (type === 'photo') title = `Photo · ${shortDate(now)}`;
         else title = `Voice note · ${shortDate(now)}, ${time(new Date(now))}`;
       }
+      const ownTitle = $('#capTitle', body).value.trim();
+      if (ownTitle) title = ownTitle;
       const folderInput = $('#folder', body).value.trim();
       const note = {
         id: DB.uid(), createdAt: now, updatedAt: now, type,
