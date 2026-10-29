@@ -117,6 +117,14 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
 .hello .script { font-size: 30px; line-height: 1; }
 .hello .brand { font-size: 52px; font-weight: 800; margin: 0; line-height: 1; letter-spacing: -.03em; }
 .hello .sub { font-size: 20px; margin-top: 2px; }
+.brand-btn { background: none; border: 0; padding: 0; text-align: left; display: block; color: inherit; }
+.hello { min-width: 0; }
+.head-right { flex: none; }
+.brand-btn .brand { overflow-wrap: break-word; }
+.title-row { display: flex; align-items: flex-start; gap: 10px; margin: 4px 0 10px; }
+.title-row .detail-title { flex: 1; margin: 0; cursor: text; }
+.title-row .title-input { flex: 1; font-size: 19px; font-weight: 600; }
+.title-row .icon-btn, .title-row .ink-btn { margin-top: 4px; }
 .hello .greet { margin: 10px 0 0; font-size: 14px; color: var(--muted); line-height: 1.35; }
 .head-right { display: flex; flex-direction: column; align-items: flex-end; gap: 12px; }
 .date-pill {

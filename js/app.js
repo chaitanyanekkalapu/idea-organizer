@@ -107,6 +107,7 @@ if (typeof Drive === 'undefined') window.Drive = { configured: false, hasToken: 
     state.notes = await DB.allNotes();
     Object.assign(state.drive, await DB.getSetting('drive', {}));
     state.drive.deleted = await DB.getSetting('driveDeleted', {});
+    state.settings.home = await DB.getSetting('home', { title: 'Ideas', sub: 'Idea Organizer' });
   }
 
   function folders() {
@@ -338,8 +339,10 @@ if (typeof Drive === 'undefined') window.Drive = { configured: false, hasToken: 
       <div class="home-head">
         <div class="hello">
           <div class="script">Hello!</div>
-          <h1 class="brand">Ideas</h1>
-          <div class="script sub">Idea Organizer ✎</div>
+          <button class="brand-btn" id="editHome" aria-label="Edit Home title">
+            <h1 class="brand" style="font-size:${brandSize(state.settings.home.title)}px">${esc(state.settings.home.title)}</h1>
+            <div class="script sub">${esc(state.settings.home.sub)} ✎</div>
+          </button>
           <p class="greet">${greet}!<br>Have a nice day!</p>
         </div>
         <div class="head-right">
@@ -367,7 +370,7 @@ if (typeof Drive === 'undefined') window.Drive = { configured: false, hasToken: 
           <span class="tile-ic">🔔</span>
           <b>${rems.length}</b>
           <span>Open reminders</span>
-          <small>${state.notes.filter(n => n.createdAt > weekAgo).length} ideas this week</small>
+          <small>${plural(state.notes.filter(n => n.createdAt > weekAgo).length, 'idea')} this week</small>
         </button>
         <button class="tile rec-tile" id="bigmic" aria-label="Record a voice memory">
           <span class="rec-thumb">${ICONS.voice}</span>
@@ -386,6 +389,7 @@ if (typeof Drive === 'undefined') window.Drive = { configured: false, hasToken: 
       <div class="signature script">Designed with creativity ♡</div>
     `;
     $('#bigmic').onclick = () => openCapture('voice', true);
+    $('#editHome').onclick = openHomeTitle;
     const chip = $('#syncChip');
     if (chip) chip.onclick = () => syncNow(true);
     const setup = $('#syncSetup');
@@ -395,6 +399,33 @@ if (typeof Drive === 'undefined') window.Drive = { configured: false, hasToken: 
     $('#more').onclick = openMoreMenu;
     bindReminders();
     bindCards();
+  }
+
+  // Longer Home titles get a smaller font so a name stays on one line beside the date pill.
+  const brandSize = t => { const n = [...(t || '')].length; return n <= 5 ? 52 : n <= 7 ? 42 : n <= 10 ? 34 : n <= 14 ? 27 : 23; };
+
+  // The big Home heading and the script line under it, e.g. "Raj / Creative Designer".
+  function openHomeTitle() {
+    const h = state.settings.home;
+    openSheet(`
+      <div class="sheet-head"><h2>Home title</h2><button class="icon-btn" data-close aria-label="Close">${ICONS.close}</button></div>
+      <label class="field" for="homeTitle">Title</label>
+      <input class="input" id="homeTitle" value="${esc(h.title)}" maxlength="24" placeholder="Ideas">
+      <label class="field" for="homeSub">Subtitle (handwritten line)</label>
+      <input class="input" id="homeSub" value="${esc(h.sub)}" maxlength="40" placeholder="Idea Organizer">
+      <div class="row end"><button class="btn ghost" id="homeReset">Reset</button><button class="btn" id="homeSave">Save</button></div>
+    `, body => {
+      $('[data-close]', body).onclick = () => closeSheet();
+      $('#homeReset', body).onclick = () => { $('#homeTitle', body).value = 'Ideas'; $('#homeSub', body).value = 'Idea Organizer'; };
+      $('#homeSave', body).onclick = async () => {
+        state.settings.home = { title: $('#homeTitle', body).value.trim() || 'Ideas', sub: $('#homeSub', body).value.trim() };
+        await DB.setSetting('home', state.settings.home);
+        closeSheet();
+        render();
+        toast('Home title saved');
+      };
+      $('#homeTitle', body).focus();
+    });
   }
 
   function emptyHTML(msg) {
@@ -1015,7 +1046,10 @@ if (typeof Drive === 'undefined') window.Drive = { configured: false, hasToken: 
     openSheet(`
       <div class="sheet-head"><div class="detail-meta" style="flex:1">${meta.join(' • ')}</div>
         <button class="icon-btn" data-close aria-label="Close">${ICONS.close}</button></div>
-      <div class="detail-title">${esc(n.title || 'Untitled memory')}</div>
+      <div class="title-row" id="titleRow">
+        <div class="detail-title">${esc(n.title || 'Untitled memory')}</div>
+        <button class="icon-btn" id="editTitle" aria-label="Edit title">${ICONS.text}</button>
+      </div>
       <div class="stamps">
         <span>📅 Saved ${esc(dateStamp(n.createdAt, ' at '))}</span>
         ${wasEdited(n) ? `<span>✏️ Edited ${esc(dateStamp(n.updatedAt, ' at '))}</span>` : ''}
@@ -1036,6 +1070,30 @@ if (typeof Drive === 'undefined') window.Drive = { configured: false, hasToken: 
       $('[data-close]', body).onclick = () => closeSheet();
       $('#edit', body).onclick = () => openEdit(n.id);
       $('#share', body).onclick = () => openShare([n], n.title);
+      // Quick title edit: swap the heading for an input right where it is.
+      const row = $('#titleRow', body);
+      const editTitle = () => {
+        row.innerHTML = `<input class="input title-input" id="titleInput" value="${esc(n.title || '')}" placeholder="Title" maxlength="140" enterkeyhint="done">
+          <button class="icon-btn" id="titleCancel" aria-label="Cancel">${ICONS.close}</button>
+          <button class="ink-btn sm" id="titleSave" aria-label="Save title">${ICONS.check}</button>`;
+        const inp = $('#titleInput', row);
+        inp.focus();
+        inp.select();
+        const save = async () => {
+          const t = inp.value.trim();
+          if (!t) { toast('Title can\'t be empty'); inp.focus(); return; }
+          if (t !== n.title) { n.title = t; await saveNote(n); render(); toast('Title saved'); }
+          openDetail(n.id);
+        };
+        $('#titleSave', row).onclick = save;
+        $('#titleCancel', row).onclick = () => openDetail(n.id);
+        inp.onkeydown = e => {
+          if (e.key === 'Enter') { e.preventDefault(); save(); }
+          if (e.key === 'Escape') openDetail(n.id);
+        };
+      };
+      $('#editTitle', body).onclick = editTitle;
+      $('.detail-title', body).onclick = editTitle;
       $('#del', body).onclick = async () => {
         if (!confirm('Delete this memory? This cannot be undone.')) return;
         await removeNote(n);
